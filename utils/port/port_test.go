@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/IceWhaleTech/CasaOS-Common/utils/port"
+	"github.com/inkly/CasaOS-Common/utils/port"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

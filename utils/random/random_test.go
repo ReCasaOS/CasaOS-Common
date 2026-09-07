@@ -3,7 +3,7 @@ package random_test
 import (
 	"testing"
 
-	"github.com/IceWhaleTech/CasaOS-Common/utils/random"
+	"github.com/inkly/CasaOS-Common/utils/random"
 )
 
 func TestString(t *testing.T) {
