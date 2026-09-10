@@ -1,8 +1,8 @@
 # CasaOS-Common
 
-> **Not affiliated with IceWhale.** An independent, community-maintained distribution of CasaOS, not produced or endorsed by Shanghai IceWhale Technology Limited. CASAOS is their trademark, used here only to say what this is a release of. The original project is [IceWhaleTech/CasaOS](https://github.com/IceWhaleTech/CasaOS); report problems with this distribution at [inkly/CasaOS/issues](https://github.com/ReCasaOS/CasaOS/issues).
+> **Not affiliated with IceWhale.** An independent, community-maintained distribution of CasaOS, not produced or endorsed by Shanghai IceWhale Technology Limited. CASAOS is their trademark, used here only to say what this is a release of. The original project is [IceWhaleTech/CasaOS](https://github.com/IceWhaleTech/CasaOS); report problems with this distribution at [ReCasaOS/CasaOS/issues](https://github.com/ReCasaOS/CasaOS/issues).
 
-Common structs and functions shared by the components of the [inkly distribution of CasaOS](https://github.com/ReCasaOS/CasaOS-Install#readme): the JWT helpers the services authenticate each other with, the logger, the shared error codes and models, the systemd and command helpers, and the small clients each component uses to reach the others.
+Common structs and functions shared by the components of the [ReCasaOS](https://github.com/ReCasaOS/CasaOS-Install#readme): the JWT helpers the services authenticate each other with, the logger, the shared error codes and models, the systemd and command helpers, and the small clients each component uses to reach the others.
 
 ## Why this fork exists
 
