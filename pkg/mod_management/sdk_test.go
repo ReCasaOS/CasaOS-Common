@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	codegen "github.com/inkly/CasaOS-Common/codegen/mod_management"
-	"github.com/inkly/CasaOS-Common/external"
-	modmanagement "github.com/inkly/CasaOS-Common/pkg/mod_management"
+	codegen "github.com/ReCasaOS/CasaOS-Common/codegen/mod_management"
+	"github.com/ReCasaOS/CasaOS-Common/external"
+	modmanagement "github.com/ReCasaOS/CasaOS-Common/pkg/mod_management"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

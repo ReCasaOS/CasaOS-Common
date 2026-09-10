@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/inkly/CasaOS-Common/codegen/mod_management"
-	"github.com/inkly/CasaOS-Common/external"
+	"github.com/ReCasaOS/CasaOS-Common/codegen/mod_management"
+	"github.com/ReCasaOS/CasaOS-Common/external"
 	"github.com/tidwall/gjson"
 )
 

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/inkly/CasaOS-Common/model"
-	http2 "github.com/inkly/CasaOS-Common/utils/http"
+	"github.com/ReCasaOS/CasaOS-Common/model"
+	http2 "github.com/ReCasaOS/CasaOS-Common/utils/http"
 	"github.com/tidwall/gjson"
 )
 

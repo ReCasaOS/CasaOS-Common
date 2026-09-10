@@ -1,7 +1,7 @@
 package idevice
 
 import (
-	"github.com/inkly/CasaOS-Common/utils/file"
+	"github.com/ReCasaOS/CasaOS-Common/utils/file"
 )
 
 func GetOSRelease(name []string) (map[string]string, error) {

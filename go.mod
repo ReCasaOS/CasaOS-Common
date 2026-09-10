@@ -1,4 +1,4 @@
-module github.com/inkly/CasaOS-Common
+module github.com/ReCasaOS/CasaOS-Common
 
 go 1.21
 

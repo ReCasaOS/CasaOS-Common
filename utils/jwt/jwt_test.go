@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/inkly/CasaOS-Common/model"
-	"github.com/inkly/CasaOS-Common/utils/common_err"
-	"github.com/inkly/CasaOS-Common/utils/jwt"
+	"github.com/ReCasaOS/CasaOS-Common/model"
+	"github.com/ReCasaOS/CasaOS-Common/utils/common_err"
+	"github.com/ReCasaOS/CasaOS-Common/utils/jwt"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

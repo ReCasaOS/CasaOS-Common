@@ -19,9 +19,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/inkly/CasaOS-Common/utils/constants"
-	http2 "github.com/inkly/CasaOS-Common/utils/http"
-	"github.com/inkly/CasaOS-Common/utils/jwt"
+	"github.com/ReCasaOS/CasaOS-Common/utils/constants"
+	http2 "github.com/ReCasaOS/CasaOS-Common/utils/http"
+	"github.com/ReCasaOS/CasaOS-Common/utils/jwt"
 	"github.com/orca-zhang/ecache"
 )
 

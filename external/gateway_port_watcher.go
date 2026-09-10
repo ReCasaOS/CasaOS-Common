@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/inkly/CasaOS-Common/utils/constants"
+	"github.com/ReCasaOS/CasaOS-Common/utils/constants"
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/ini.v1"
 )

@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	http2 "github.com/inkly/CasaOS-Common/utils/http"
+	http2 "github.com/ReCasaOS/CasaOS-Common/utils/http"
 )
 
 func getAddress(addressFile string) (string, error) {
