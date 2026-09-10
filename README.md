@@ -1,8 +1,8 @@
 # CasaOS-Common
 
-> **Not affiliated with IceWhale.** An independent, community-maintained distribution of CasaOS, not produced or endorsed by Shanghai IceWhale Technology Limited. CASAOS is their trademark, used here only to say what this is a release of. The original project is [IceWhaleTech/CasaOS](https://github.com/IceWhaleTech/CasaOS); report problems with this distribution at [inkly/CasaOS/issues](https://github.com/inkly/CasaOS/issues).
+> **Not affiliated with IceWhale.** An independent, community-maintained distribution of CasaOS, not produced or endorsed by Shanghai IceWhale Technology Limited. CASAOS is their trademark, used here only to say what this is a release of. The original project is [IceWhaleTech/CasaOS](https://github.com/IceWhaleTech/CasaOS); report problems with this distribution at [inkly/CasaOS/issues](https://github.com/ReCasaOS/CasaOS/issues).
 
-Common structs and functions shared by the components of the [inkly distribution of CasaOS](https://github.com/inkly/CasaOS-Install#readme): the JWT helpers the services authenticate each other with, the logger, the shared error codes and models, the systemd and command helpers, and the small clients each component uses to reach the others.
+Common structs and functions shared by the components of the [inkly distribution of CasaOS](https://github.com/ReCasaOS/CasaOS-Install#readme): the JWT helpers the services authenticate each other with, the logger, the shared error codes and models, the systemd and command helpers, and the small clients each component uses to reach the others.
 
 ## Why this fork exists
 
@@ -15,10 +15,10 @@ This fork starts at upstream `v0.4.21`, unchanged apart from the module path, wh
 Components are not installed individually. The whole distribution is installed and upgraded with one command:
 
 ```sh
-curl -fsSL https://github.com/inkly/CasaOS-Install/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/ReCasaOS/CasaOS-Install/releases/latest/download/install.sh | sudo bash
 ```
 
-What a release contains, and how it is built, is described in [CasaOS-Install](https://github.com/inkly/CasaOS-Install#readme).
+What a release contains, and how it is built, is described in [CasaOS-Install](https://github.com/ReCasaOS/CasaOS-Install#readme).
 
 ## Development
 
