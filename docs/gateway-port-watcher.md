@@ -43,7 +43,7 @@ import (
     "context"
     "log"
 
-    "github.com/IceWhaleTech/CasaOS-Common/external"
+    "github.com/ReCasaOS/CasaOS-Common/external"
 )
 
 func main() {
