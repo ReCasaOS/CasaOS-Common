@@ -8,7 +8,7 @@ Common structs and functions shared by the components of the [ReCasaOS](https://
 
 Every other component of this distribution was already forked; this library was not. Its six consumers each pinned a different IceWhale alpha — from `v0.4.4-alpha2` to `v0.4.11-alpha4` — of a module nobody here could patch. Nothing was broken: those versions are immutable on `proxy.golang.org` and would keep building even if the upstream repository disappeared. What was missing was the ability to fix a bug in shared authentication code, which is most of what this library contains.
 
-This fork starts at upstream `v0.4.21`, unchanged apart from the module path, which is now `github.com/inkly/CasaOS-Common`. The six components are unified on it, where before each carried its own version.
+This fork starts at upstream `v0.4.21`, unchanged apart from the module path, which is now `github.com/ReCasaOS/CasaOS-Common`. The six components are unified on it, where before each carried its own version.
 
 ## Install
 
