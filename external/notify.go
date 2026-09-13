@@ -58,6 +58,8 @@ func (n *notifyService) SendSystemStatusNotify(message map[string]interface{}) e
 }
 
 func NewNotifyService(runtimePath string) NotifyService {
+	useInternalSecret(runtimePath)
+
 	return &notifyService{
 		addressFile: filepath.Join(runtimePath, CasaOSURLFilename),
 	}

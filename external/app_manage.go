@@ -68,6 +68,8 @@ func (m *appManageService) PutAppStatus(storeId string, status string) (bool, er
 }
 
 func NewAppManageService(RuntimePath string) (AppManageService, error) {
+	useInternalSecret(RuntimePath)
+
 	managementAddressFile := filepath.Join(RuntimePath, AppManageURLFilename)
 
 	retry := 10

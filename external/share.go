@@ -44,6 +44,8 @@ func (n *shareService) DeleteShare(id string) error {
 }
 
 func NewShareService(runtimePath string) ShareService {
+	useInternalSecret(runtimePath)
+
 	return &shareService{
 		addressFile: filepath.Join(runtimePath, CasaOSURLFilename),
 	}

@@ -91,6 +91,8 @@ func (m *managementService) GetPort() (error, string) {
 }
 
 func NewManagementService(RuntimePath string) (ManagementService, error) {
+	useInternalSecret(RuntimePath)
+
 	managementAddressFile := filepath.Join(RuntimePath, ManagementURLFilename)
 
 	retry := 10

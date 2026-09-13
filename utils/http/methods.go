@@ -4,9 +4,45 @@ package http
 import (
 	"bytes"
 	"context"
+	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
+
+// internalAuthorization, when set, is the Authorization header sent with every
+// request to a loopback address that has none of its own: this box's internal
+// secret, see external.IsInternalRequest. Never sent anywhere else.
+var internalAuthorization atomic.Pointer[func() string]
+
+// SetInternalAuthorization installs (or, with nil, removes) the provider of the
+// internal Authorization header.
+func SetInternalAuthorization(provider func() string) {
+	if provider == nil {
+		internalAuthorization.Store(nil)
+		return
+	}
+	internalAuthorization.Store(&provider)
+}
+
+func addInternalAuthorization(request *http.Request) {
+	provider := internalAuthorization.Load()
+	if provider == nil || request.Header.Get("Authorization") != "" || !isLoopbackHost(request.URL.Hostname()) {
+		return
+	}
+	if value := (*provider)(); value != "" {
+		request.Header.Set("Authorization", value)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
+}
 
 func Do(requestFunc func(ctx context.Context) (*http.Request, error), timeout time.Duration) (*http.Response, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -21,6 +57,8 @@ func Do(requestFunc func(ctx context.Context) (*http.Request, error), timeout ti
 	if err != nil {
 		return nil, err
 	}
+
+	addInternalAuthorization(request)
 
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
