@@ -59,11 +59,31 @@ type ParsedToken struct {
 	UserID    int    `json:"user_id"`
 }
 
+// GetPublicKey is the key user-service signs tokens with: asked for every ten
+// seconds, and the key last seen in between. When user-service does not answer
+// -- restarting, or held still for a backup of the box -- the key last seen
+// goes on validating: the key does not change while it is down, and a dashboard
+// that was logged in a second ago has no reason to be logged out by a restart.
+// A service that never saw a key has nothing to check with, and says so.
 func GetPublicKey(runtimePath string) (*ecdsa.PublicKey, error) {
 	if cachedPublicKey != nil && time.Since(lastUpdate) < 10*time.Second {
 		return cachedPublicKey, nil
 	}
 
+	key, err := fetchPublicKey(runtimePath)
+	if err != nil {
+		if cachedPublicKey != nil {
+			return cachedPublicKey, nil
+		}
+
+		return nil, err
+	}
+
+	return key, nil
+}
+
+// fetchPublicKey asks user-service for its key and keeps it.
+func fetchPublicKey(runtimePath string) (*ecdsa.PublicKey, error) {
 	address, err := getAddress(filepath.Join(runtimePath, UserServiceAddressFilename))
 	if err != nil {
 		return nil, err
