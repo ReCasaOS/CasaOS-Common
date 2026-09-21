@@ -1,6 +1,7 @@
 package external
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -106,5 +107,37 @@ func TestTheClientsSendTheSecretToLoopbackOnTheirOwn(t *testing.T) {
 	want := []string{internalScheme + secret, internalScheme + secret, internalScheme + secret, internalScheme + secret, "Bearer mine"}
 	if strings.Join(seen, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %q, want %q", seen, want)
+	}
+}
+
+func TestTheRequestEditorSendsTheSecretToLoopbackOnly(t *testing.T) {
+	dir, secret := writeSecretFor(t)
+	edit := InternalRequestEditor(dir)
+
+	for url, want := range map[string]string{
+		"http://127.0.0.1:8080/v2/message_bus/event/x": internalScheme + secret,
+		"http://[::1]:8080/v2/message_bus/event/x":     internalScheme + secret,
+		"http://localhost:8080/v2/message_bus":         internalScheme + secret,
+		"http://192.168.1.20:8080/v2/message_bus":      "",
+		"https://example.com/v2/message_bus":           "",
+	} {
+		req := httptest.NewRequest(http.MethodPost, url, nil)
+		if err := edit(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		if got := req.Header.Get("Authorization"); got != want {
+			t.Errorf("%s: got %q, want %q", url, got, want)
+		}
+	}
+
+	mine := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/", nil)
+	mine.Header.Set("Authorization", "Bearer mine")
+	if err := edit(context.Background(), mine); err != nil || mine.Header.Get("Authorization") != "Bearer mine" {
+		t.Fatalf("an Authorization already set must be kept, got %q (%v)", mine.Header.Get("Authorization"), err)
+	}
+
+	missing := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/", nil)
+	if err := InternalRequestEditor(t.TempDir())(context.Background(), missing); err != nil || missing.Header.Get("Authorization") != "" {
+		t.Fatalf("with no secret file the request goes without one, got %q (%v)", missing.Header.Get("Authorization"), err)
 	}
 }

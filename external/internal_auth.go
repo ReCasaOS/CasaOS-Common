@@ -1,10 +1,13 @@
 package external
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,4 +101,32 @@ func useInternalSecret(runtimePath string) {
 
 		return internalScheme + secret
 	})
+}
+
+// InternalRequestEditor is for the API clients oapi-codegen generates, which do
+// not go through the HTTP helpers of this module and so never sent the secret:
+// pass it to their WithRequestEditorFn, and a request to one of this box's
+// services carries it like every other internal call. Only loopback
+// destinations get it, and a request that already has an Authorization header
+// keeps its own.
+func InternalRequestEditor(runtimePath string) func(ctx context.Context, req *http.Request) error {
+	return func(_ context.Context, req *http.Request) error {
+		if req.Header.Get("Authorization") != "" || !isLoopbackHost(req.URL.Hostname()) {
+			return nil
+		}
+		if secret, err := readInternalSecret(runtimePath); err == nil {
+			req.Header.Set("Authorization", internalScheme+secret)
+		}
+
+		return nil
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
 }
