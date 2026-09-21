@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/mholt/archives"
 )
@@ -383,8 +385,8 @@ func SpliceFiles(dir, path string, length int, startPoint int) error {
 }
 
 // GetCompressionAlgorithm returns the file extension and the archiver for a
-// download format. Hand the archiver the entries collected with AddFile.
-func GetCompressionAlgorithm(t string) (string, archives.Archiver, error) {
+// download format, to hand to WriteArchive.
+func GetCompressionAlgorithm(t string) (string, archives.ArchiverAsync, error) {
 	tar := archives.Tar{}
 	switch t {
 	case "zip", "":
@@ -404,6 +406,212 @@ func GetCompressionAlgorithm(t string) (string, archives.Archiver, error) {
 	default:
 		return "", nil, errors.New("format not implemented")
 	}
+}
+
+// WriteArchive streams to w an archive, in format, of paths, each of which is
+// commonPath or lies under it. Entries are written while the paths are walked,
+// so the first bytes go out before the walk ends.
+//
+// Entries are named after the last element of commonPath followed by their
+// place under commonPath; directories end with '/'. A selected commonPath that
+// is a directory gets no entry of its own, only its contents; one that is a
+// file is archived under its name. A selected symlink is followed, since the
+// user picked it: its target is archived under the link's name. Inside a
+// selected directory, symlinks are stored as symlinks and never followed;
+// devices, pipes and sockets are skipped.
+//
+// Any failure is an error: a path that is missing or unreadable, a file that
+// changed while it was archived, a write to w or its final flush, or ctx being
+// done. After an error nothing more is written to w, so the archive is left
+// unterminated rather than looking complete.
+func WriteArchive(ctx context.Context, w io.Writer, format archives.ArchiverAsync, commonPath string, paths []string) error {
+	if len(paths) == 0 {
+		return errors.New("no path to archive")
+	}
+
+	out := &archiveWriter{ctx: ctx, w: w}
+	jobs := make(chan archives.ArchiveAsyncJob)
+	finished := make(chan struct{})
+	var archErr error
+	go func() {
+		defer close(finished)
+		archErr = format.ArchiveAsync(ctx, out, jobs)
+	}()
+
+	add := func(f archives.FileInfo) error {
+		result := make(chan error, 1)
+		select {
+		case jobs <- archives.ArchiveAsyncJob{File: f, Result: result}:
+			return <-result
+		case <-finished:
+			return fmt.Errorf("archiver stopped early: %v", archErr)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	var err error
+	for _, p := range paths {
+		if err = addTree(ctx, add, commonPath, p); err != nil {
+			err = fmt.Errorf("archive %s: %w", p, err)
+			out.fail(err) // leave the archive unterminated
+			break
+		}
+	}
+	close(jobs)
+	<-finished
+
+	if err == nil {
+		err = archErr
+	}
+	if err == nil {
+		// archives closes its writers without checking the error: a failed
+		// final flush only shows here.
+		err = out.fail(nil)
+	}
+	return err
+}
+
+// addTree hands add the entries for one selected path, as they are walked.
+func addTree(ctx context.Context, add func(archives.FileInfo) error, commonPath, selected string) error {
+	selected = filepath.Clean(selected)
+	name, err := entryName(commonPath, selected)
+	if err != nil {
+		return err
+	}
+	// Follow a selected symlink, as archiver/v3 did.
+	target, err := filepath.EvalSymlinks(selected)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	dir, start := target, "."
+	if !info.IsDir() {
+		dir, start = filepath.Dir(target), filepath.Base(target)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	skipStart := info.IsDir() && selected == filepath.Clean(commonPath)
+
+	return fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		f := archives.FileInfo{FileInfo: info, NameInArchive: name}
+		if p != start {
+			f.NameInArchive = path.Join(name, p)
+		}
+		switch mode := info.Mode(); {
+		case mode.IsDir():
+			if p == start && skipStart {
+				return nil
+			}
+			f.NameInArchive += "/" // tar too, as archiver/v3 wrote it
+		case mode&fs.ModeSymlink != 0:
+			if f.LinkTarget, err = root.Readlink(p); err != nil {
+				return err
+			}
+		case mode.IsRegular():
+			f.Open = func() (fs.File, error) { return openSame(root, p, info) }
+		default:
+			return nil // devices, pipes and sockets
+		}
+		return add(f)
+	})
+}
+
+// entryName is the archive name of selected: the last element of commonPath
+// followed by selected's place under commonPath, as archiver/v3 named it.
+func entryName(commonPath, selected string) (string, error) {
+	if commonPath == "" {
+		commonPath = "/" // CommonPrefix of paths that only share the root
+	}
+	rel, err := filepath.Rel(commonPath, selected)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("not under %s", commonPath)
+	}
+	return strings.TrimPrefix(path.Join(filepath.ToSlash(filepath.Base(commonPath)), filepath.ToSlash(rel)), "/"), nil
+}
+
+// openSame opens name under root, and only if it is still the regular file the
+// walk saw. Between the walk and the read, a symlink put in its place that
+// leads out of the tree is refused by root, and any other file by SameFile.
+// O_NONBLOCK keeps a named pipe put in its place from blocking the open.
+func openSame(root *os.Root, name string, seen fs.FileInfo) (fs.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err == nil && (!st.Mode().IsRegular() || !os.SameFile(st, seen)) {
+		err = fmt.Errorf("%s changed while it was archived", name)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &sizedFile{File: f, left: seen.Size()}, nil
+}
+
+// sizedFile fails, instead of ending, when the file holds fewer bytes than the
+// walk saw and the header announced. archives would otherwise write a short zip
+// entry, or a tar cut before its end, and report success.
+type sizedFile struct {
+	fs.File
+	left int64
+}
+
+func (f *sizedFile) Read(p []byte) (int, error) {
+	n, err := f.File.Read(p)
+	f.left -= int64(n)
+	if err == io.EOF && f.left > 0 {
+		err = io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+// archiveWriter passes writes to w until the first error, from w or from ctx,
+// and refuses every write after it. archives ignores the error of its final
+// Close, so a failed flush at the end of a zip or a compressed stream is only
+// seen here.
+type archiveWriter struct {
+	ctx context.Context
+	w   io.Writer
+	mu  sync.Mutex
+	err error
+}
+
+func (a *archiveWriter) Write(p []byte) (int, error) {
+	if err := a.fail(a.ctx.Err()); err != nil {
+		return 0, err
+	}
+	n, err := a.w.Write(p)
+	a.fail(err)
+	return n, err
+}
+
+// fail records err, unless an error is already recorded, and returns the
+// recorded error.
+func (a *archiveWriter) fail(err error) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.err == nil {
+		a.err = err
+	}
+	return a.err
 }
 
 func IsBrokenSymlink(path string) (bool, error) {
@@ -431,34 +639,6 @@ func IsBrokenSymlink(path string) (bool, error) {
 	}
 
 	return false, nil
-}
-
-// AddFile appends to files the archive entries for path, walking it when it is
-// a directory. Entries are named after the last element of commonPath followed
-// by their place under commonPath; commonPath itself gets no entry of its own.
-// Symlinks are stored as symlinks and never followed; devices, pipes and
-// sockets are skipped. On error files is returned unchanged.
-func AddFile(files []archives.FileInfo, path, commonPath string) ([]archives.FileInfo, error) {
-	name := filepath.ToSlash(filepath.Join(filepath.Base(commonPath), strings.Replace(path, commonPath, "", 1)))
-	found, err := archives.FilesFromDisk(context.Background(), nil, map[string]string{filepath.Clean(path): name})
-	if err != nil {
-		return files, err
-	}
-
-	for _, f := range found {
-		if path == commonPath && f.NameInArchive == name {
-			continue
-		}
-		if f.Mode().Type()&^(fs.ModeDir|fs.ModeSymlink) != 0 {
-			continue
-		}
-		if f.IsDir() {
-			f.NameInArchive += "/" // tar too, as archiver/v3 wrote it
-		}
-		files = append(files, f)
-	}
-
-	return files, nil
 }
 
 func CommonPrefix(sep byte, paths ...string) string {
