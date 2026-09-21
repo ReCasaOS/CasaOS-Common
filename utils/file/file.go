@@ -1,7 +1,9 @@
 package file
 
 import (
+	"archive/zip"
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,9 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ReCasaOS/CasaOS-Common/utils/logger"
-	"github.com/mholt/archiver/v3"
-	"go.uber.org/zap"
+	"github.com/mholt/archives"
 )
 
 // GetSize get the file size
@@ -382,26 +382,30 @@ func SpliceFiles(dir, path string, length int, startPoint int) error {
 	return nil
 }
 
-func GetCompressionAlgorithm(t string) (string, archiver.Writer, error) {
+// GetCompressionAlgorithm returns the file extension and the archiver for a
+// download format. Hand the archiver the entries collected with AddFile.
+func GetCompressionAlgorithm(t string) (string, archives.Archiver, error) {
+	tar := archives.Tar{}
 	switch t {
 	case "zip", "":
-		return ".zip", archiver.NewZip(), nil
+		return ".zip", archives.Zip{Compression: zip.Deflate, SelectiveCompression: true}, nil
 	case "tar":
-		return ".tar", archiver.NewTar(), nil
+		return ".tar", tar, nil
 	case "targz":
-		return ".tar.gz", archiver.NewTarGz(), nil
+		return ".tar.gz", archives.CompressedArchive{Archival: tar, Compression: archives.Gz{}}, nil
 	case "tarbz2":
-		return ".tar.bz2", archiver.NewTarBz2(), nil
+		return ".tar.bz2", archives.CompressedArchive{Archival: tar, Compression: archives.Bz2{}}, nil
 	case "tarxz":
-		return ".tar.xz", archiver.NewTarXz(), nil
+		return ".tar.xz", archives.CompressedArchive{Archival: tar, Compression: archives.Xz{}}, nil
 	case "tarlz4":
-		return ".tar.lz4", archiver.NewTarLz4(), nil
+		return ".tar.lz4", archives.CompressedArchive{Archival: tar, Compression: archives.Lz4{}}, nil
 	case "tarsz":
-		return ".tar.sz", archiver.NewTarSz(), nil
+		return ".tar.sz", archives.CompressedArchive{Archival: tar, Compression: archives.Sz{}}, nil
 	default:
 		return "", nil, errors.New("format not implemented")
 	}
 }
+
 func IsBrokenSymlink(path string) (bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -429,64 +433,29 @@ func IsBrokenSymlink(path string) (bool, error) {
 	return false, nil
 }
 
-func AddFile(ar archiver.Writer, path, commonPath string) error {
-	info, err := os.Stat(path)
+// AddFile appends to files the archive entries for path, walking it when it is
+// a directory. Entries are named after the last element of commonPath followed
+// by their place under commonPath; commonPath itself gets no entry of its own.
+// Symlinks are stored as symlinks and never followed; devices, pipes and
+// sockets are skipped. On error files is returned unchanged.
+func AddFile(files []archives.FileInfo, path, commonPath string) ([]archives.FileInfo, error) {
+	name := filepath.ToSlash(filepath.Join(filepath.Base(commonPath), strings.Replace(path, commonPath, "", 1)))
+	found, err := archives.FilesFromDisk(context.Background(), nil, map[string]string{filepath.Clean(path): name})
 	if err != nil {
-		return err
+		return files, err
 	}
 
-	if !info.IsDir() && !info.Mode().IsRegular() {
-		return nil
-	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	if path != commonPath {
-		//filename := info.Name()
-		fpath := strings.Replace(path, commonPath, "", 1)
-		fpath = filepath.Join(filepath.Base(commonPath), fpath)
-		//filename := info.Name()
-		err = ar.Write(archiver.File{
-			FileInfo: archiver.FileInfo{
-				FileInfo:   info,
-				CustomName: fpath,
-			},
-			ReadCloser: file,
-		})
-		if err != nil {
-			return err
+	for _, f := range found {
+		if path == commonPath && f.NameInArchive == name {
+			continue
 		}
+		if f.Mode().Type()&^(fs.ModeDir|fs.ModeSymlink) != 0 {
+			continue
+		}
+		files = append(files, f)
 	}
 
-	if info.IsDir() {
-		names, err := file.Readdirnames(0)
-		if err != nil {
-			return err
-		}
-
-		for _, name := range names {
-			filePath := filepath.Join(path, name)
-			isBroken, err := IsBrokenSymlink(filePath)
-			if err != nil {
-				logger.Error("Failed to check symlink", zap.Any("name", filePath), zap.Error(err))
-				continue
-			}
-			if isBroken {
-				continue
-			}
-
-			err = AddFile(ar, filePath, commonPath)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+	return files, nil
 }
 
 func CommonPrefix(sep byte, paths ...string) string {
