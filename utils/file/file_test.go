@@ -332,3 +332,23 @@ func TestWriteArchiveFileSwappedAfterWalk(t *testing.T) {
 		})
 	}
 }
+
+// An entry that disappears after its directory was listed, and before the walk
+// reaches it, is left out rather than failing the whole download: on a live
+// folder that is routine, and the walk moves at the client's pace.
+func TestWriteArchiveEntryGoneDuringWalk(t *testing.T) {
+	_, data := tree(t)
+	removed := errors.New("the removal did not run")
+	w := &onHeader{name: "data/a.txt", swap: func() {
+		removed = errors.Join(os.RemoveAll(filepath.Join(data, "sub")), os.Remove(filepath.Join(data, "other.txt")))
+	}}
+	require.NoError(t, writeArchive(context.Background(), t, w, "tar", data, data))
+	require.NoError(t, removed)
+
+	got := entries(t, "tar", w.Bytes())
+	require.Equal(t, "alpha", got["data/a.txt"])
+	require.Contains(t, got, "data/empty/")
+	for _, name := range []string{"data/other.txt", "data/sub/", "data/sub/b.txt"} {
+		require.NotContains(t, got, name)
+	}
+}

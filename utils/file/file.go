@@ -444,7 +444,7 @@ func WriteArchive(ctx context.Context, w io.Writer, format archives.ArchiverAsyn
 		case jobs <- archives.ArchiveAsyncJob{File: f, Result: result}:
 			return <-result
 		case <-finished:
-			return fmt.Errorf("archiver stopped early: %v", archErr)
+			return fmt.Errorf("archiver stopped early: %w", archErr)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -499,14 +499,22 @@ func addTree(ctx context.Context, add func(archives.FileInfo) error, commonPath,
 	defer root.Close()
 	skipStart := info.IsDir() && selected == filepath.Clean(commonPath)
 
-	return fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(root.FS(), start, func(p string, _ fs.DirEntry, err error) error {
 		if err == nil {
 			err = ctx.Err()
+		}
+		if gone(p, start, err) {
+			return nil
 		}
 		if err != nil {
 			return err
 		}
-		info, err := d.Info()
+		// Lstat through the root rather than d.Info(): fresh on every platform (Windows
+		// answers Info from the directory listing) and confined to the tree.
+		info, err := root.Lstat(p)
+		if gone(p, start, err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -522,6 +530,9 @@ func addTree(ctx context.Context, add func(archives.FileInfo) error, commonPath,
 			f.NameInArchive += "/" // tar too, as archiver/v3 wrote it
 		case mode&fs.ModeSymlink != 0:
 			if f.LinkTarget, err = root.Readlink(p); err != nil {
+				if gone(p, start, err) {
+					return nil
+				}
 				return err
 			}
 		case mode.IsRegular():
@@ -875,4 +886,14 @@ func NameAccumulation(path string) string {
 			return newPath
 		}
 	}
+}
+
+// gone reports an entry below the selected path that disappeared between its
+// directory's listing and the walk reaching it: a temporary file renamed, a
+// cache emptied. The walk moves at the pace of the client downloading, so on a
+// live folder that is routine, and the entry is left out, as archiver/v3's
+// callers did. The selected path itself going missing is still an error, and
+// so is a file that vanishes after its header was written.
+func gone(p, start string, err error) bool {
+	return err != nil && p != start && errors.Is(err, fs.ErrNotExist)
 }
