@@ -1,6 +1,6 @@
 module github.com/ReCasaOS/CasaOS-Common
 
-go 1.26.0
+go 1.26.8
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
