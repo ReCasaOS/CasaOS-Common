@@ -8,7 +8,6 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/google/safetext v0.0.0-20240104143208-7a7d9b3d812f
 	github.com/gorilla/websocket v1.5.3
-	github.com/labstack/echo-jwt/v4 v4.2.0
 	github.com/labstack/echo/v4 v4.15.4
 	github.com/mattn/go-sqlite3 v1.14.16
 	github.com/mholt/archives v0.1.5
@@ -35,7 +34,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.5.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect

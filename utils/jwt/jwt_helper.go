@@ -9,13 +9,6 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
-	"strconv"
-
-	"github.com/ReCasaOS/CasaOS-Common/model"
-	"github.com/ReCasaOS/CasaOS-Common/utils/common_err"
-	echojwt "github.com/labstack/echo-jwt/v4"
-	"github.com/labstack/echo/v4"
-	echo_middleware "github.com/labstack/echo/v4/middleware"
 )
 
 type JWK struct {
@@ -30,35 +23,6 @@ type JWKS struct {
 }
 
 const JWKSPath = ".well-known/jwks.json"
-
-func JWT(publicKeyFunc func() (*ecdsa.PublicKey, error)) echo.MiddlewareFunc {
-	return echojwt.WithConfig(
-		echojwt.Config{
-			Skipper: func(c echo.Context) bool {
-				return c.RealIP() == "::1" || c.RealIP() == "127.0.0.1"
-			},
-			ParseTokenFunc: func(c echo.Context, token string) (interface{}, error) {
-				valid, claims, err := Validate(token, publicKeyFunc)
-				if err != nil || !valid {
-					message := "token is invalid"
-					c.JSON(http.StatusUnauthorized, model.Result{Success: common_err.ERROR_AUTH_TOKEN, Message: message})
-					return nil, echo.ErrUnauthorized
-				}
-				c.Request().Header.Set("user_id", strconv.Itoa(claims.ID))
-
-				return claims, nil
-			},
-			TokenLookupFuncs: []echo_middleware.ValuesExtractor{
-				func(c echo.Context) ([]string, error) {
-					if len(c.Request().Header.Get(echo.HeaderAuthorization)) > 0 {
-						return []string{c.Request().Header.Get(echo.HeaderAuthorization)}, nil
-					}
-					return []string{c.QueryParam("token")}, nil
-				},
-			},
-		},
-	)
-}
 
 func GenerateKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
