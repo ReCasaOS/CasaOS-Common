@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/ReCasaOS/CasaOS-Common/utils/file"
@@ -75,7 +74,7 @@ func TestArchiveTree(t *testing.T) {
 					require.NoError(t, err)
 					switch h.Typeflag {
 					case tar.TypeDir:
-						got[strings.TrimSuffix(h.Name, "/")+"/"] = ""
+						got[h.Name] = ""
 					case tar.TypeSymlink:
 						got[h.Name] = "-> " + h.Linkname
 					default:

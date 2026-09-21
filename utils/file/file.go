@@ -452,6 +452,9 @@ func AddFile(files []archives.FileInfo, path, commonPath string) ([]archives.Fil
 		if f.Mode().Type()&^(fs.ModeDir|fs.ModeSymlink) != 0 {
 			continue
 		}
+		if f.IsDir() {
+			f.NameInArchive += "/" // tar too, as archiver/v3 wrote it
+		}
 		files = append(files, f)
 	}
 
