@@ -1,11 +1,11 @@
 package command
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -66,6 +66,10 @@ const (
 // at most ScriptTimeout. Every run is logged with its output. A failing script
 // does not stop the next ones; the failures come back joined. A missing
 // directory is not an error.
+//
+// A script that starts a daemon must redirect the daemon's output: once the
+// script has exited, its pipes are closed after a short delay, and a daemon
+// still writing to them is killed by SIGPIPE.
 func ExecuteScripts(scriptDirectory string) error {
 	entries, err := os.ReadDir(scriptDirectory)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -80,7 +84,12 @@ func ExecuteScripts(scriptDirectory string) error {
 	var failures []error
 	for _, entry := range entries {
 		path := filepath.Join(scriptDirectory, entry.Name())
-		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		info, err := os.Stat(path)
+		if err != nil {
+			logger.Warn("start script skipped", zap.String("script", entry.Name()), zap.Error(err))
+			continue
+		}
+		if !info.Mode().IsRegular() {
 			continue
 		}
 
@@ -100,6 +109,7 @@ type scriptResult struct {
 	exitCode    int
 	duration    time.Duration
 	output      string
+	warning     string
 	err         error
 }
 
@@ -114,6 +124,10 @@ var reportScript = func(r scriptResult) {
 	}
 	if r.err != nil {
 		logger.Error("start script failed", append(fields, zap.Error(r.err))...)
+		return
+	}
+	if r.warning != "" {
+		logger.Warn("start script ran", append(fields, zap.String("warning", r.warning))...)
 		return
 	}
 	logger.Info("start script ran", fields...)
@@ -133,11 +147,14 @@ func runScript(path string) scriptResult {
 	ctx, cancel := context.WithTimeout(context.Background(), ScriptTimeout)
 	defer cancel()
 
+	// os/exec directly: the arguments go to execve, no shell ever sees them, and
+	// utils/exec's injection check would refuse a legitimate shebang argument
+	// such as "-S sh -e" or a script name with a space in it.
 	var output tail
-	cmd := exec2.CommandContext(ctx, argv[0], append(argv[1:], path)...)
+	cmd := exec.CommandContext(ctx, argv[0], append(argv[1:], path)...)
 	cmd.Stdout, cmd.Stderr = &output, &output
 	cmd.WaitDelay = scriptWaitDelay
-	killGroupOnCancel(cmd.Cmd)
+	killGroupOnCancel(cmd)
 
 	start := time.Now()
 	err = cmd.Run()
@@ -146,9 +163,11 @@ func runScript(path string) scriptResult {
 	result.output = output.String()
 
 	switch {
-	case err == nil, errors.Is(err, exec.ErrWaitDelay):
-		// ErrWaitDelay: the script exited well, but something it started still
-		// held its output. Starting a daemon is not a failure.
+	case err == nil:
+	case errors.Is(err, exec.ErrWaitDelay):
+		// the script exited well, but something it started still held its
+		// output: starting a daemon is not a failure, writing there again kills it
+		result.warning = "a process the script started kept its output open; it is killed by SIGPIPE if it writes again: redirect its output"
 	case ctx.Err() != nil:
 		result.err = fmt.Errorf("timed out after %s: %w", ScriptTimeout, err)
 	default:
@@ -158,6 +177,8 @@ func runScript(path string) scriptResult {
 	return result
 }
 
+// firstLine reads what the kernel reads of a script: at most its first 256
+// bytes, up to the first newline.
 func firstLine(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -165,10 +186,14 @@ func firstLine(path string) (string, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Scan()
+	head := make([]byte, 256)
+	n, err := io.ReadFull(f, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", err
+	}
+	line, _, _ := bytes.Cut(head[:n], []byte("\n"))
 
-	return scanner.Text(), scanner.Err()
+	return strings.TrimRight(string(line), "\r"), nil
 }
 
 // interpreter reads a shebang line as the kernel does: a program and at most

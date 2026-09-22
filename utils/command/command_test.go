@@ -165,6 +165,8 @@ func TestEachScriptRunsWithItsOwnInterpreter(t *testing.T) {
 		"10-sh.sh":   "#!/bin/sh\necho plain sh\n",
 		"20-env.sh":  "#!/usr/bin/env sh\necho through env >&2\n",
 		"30-none.sh": "echo no shebang\n",
+		// cat prints the script itself: proof the shebang's program is what ran
+		"40-cat.txt": "#!/bin/cat\nhello from cat\n",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +176,7 @@ func TestEachScriptRunsWithItsOwnInterpreter(t *testing.T) {
 		{"10-sh.sh", "/bin/sh", "plain sh"},
 		{"20-env.sh", "/usr/bin/env sh", "through env"},
 		{"30-none.sh", "/bin/sh", "no shebang"},
+		{"40-cat.txt", "/bin/cat", "#!/bin/cat\nhello from cat"},
 	}
 	if len(results) != len(want) {
 		t.Fatalf("got %d scripts, want %d: %+v", len(results), len(want), results)
