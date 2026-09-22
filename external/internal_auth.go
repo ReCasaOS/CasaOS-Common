@@ -93,14 +93,20 @@ func isLoopbackIP(ip string) bool {
 // request to a loopback address. The file is read at each request, so a secret
 // rewritten by a restarted gateway is picked up without anybody restarting.
 func useInternalSecret(runtimePath string) {
-	http2.SetInternalAuthorization(func() string {
-		secret, err := readInternalSecret(runtimePath)
-		if err != nil {
-			return ""
-		}
+	http2.SetInternalAuthorization(func() string { return InternalAuthorization(runtimePath) })
+}
 
-		return internalScheme + secret
-	})
+// InternalAuthorization returns the Authorization value that makes a request
+// internal, "Internal <secret>", or "" when the secret cannot be read. It is for
+// what a request editor does not fit, such as the Config.Header of a websocket
+// handshake. Send it to loopback addresses only.
+func InternalAuthorization(runtimePath string) string {
+	secret, err := readInternalSecret(runtimePath)
+	if err != nil {
+		return ""
+	}
+
+	return internalScheme + secret
 }
 
 // InternalRequestEditor is for the API clients oapi-codegen generates, which do
@@ -114,8 +120,8 @@ func InternalRequestEditor(runtimePath string) func(ctx context.Context, req *ht
 		if req.Header.Get("Authorization") != "" || !isLoopbackHost(req.URL.Hostname()) {
 			return nil
 		}
-		if secret, err := readInternalSecret(runtimePath); err == nil {
-			req.Header.Set("Authorization", internalScheme+secret)
+		if authorization := InternalAuthorization(runtimePath); authorization != "" {
+			req.Header.Set("Authorization", authorization)
 		}
 
 		return nil

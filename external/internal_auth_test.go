@@ -141,3 +141,22 @@ func TestTheRequestEditorSendsTheSecretToLoopbackOnly(t *testing.T) {
 		t.Fatalf("with no secret file the request goes without one, got %q (%v)", missing.Header.Get("Authorization"), err)
 	}
 }
+
+func TestInternalAuthorizationIsTheHeaderValueOrNothing(t *testing.T) {
+	dir, secret := writeSecretFor(t)
+	if got := InternalAuthorization(dir); got != internalScheme+secret {
+		t.Fatalf("got %q, want %q", got, internalScheme+secret)
+	}
+
+	if got := InternalAuthorization(t.TempDir()); got != "" {
+		t.Fatalf("with no secret file, got %q", got)
+	}
+
+	empty := t.TempDir()
+	if err := os.WriteFile(filepath.Join(empty, InternalSecretFilename), []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := InternalAuthorization(empty); got != "" {
+		t.Fatalf("with an empty secret file, got %q", got)
+	}
+}
