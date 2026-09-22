@@ -16,7 +16,18 @@ import (
 const (
 	MessageBusAddressFilename = "message-bus.url"
 	APIMessageBus             = "/v2/message_bus"
+
+	// MessageBusSocketFilename is the unix socket, in the runtime path, where
+	// the message bus takes events.
+	MessageBusSocketFilename = "message-bus.sock"
 )
+
+// MessageBusSocketPath is where the message bus listens for events over a unix
+// socket: in the runtime path, which only root can write. It used to be
+// /tmp/message-bus.sock, a name any local user could take first.
+func MessageBusSocketPath(runtimePath string) string {
+	return filepath.Join(runtimePath, MessageBusSocketFilename)
+}
 
 type EventType struct {
 	Name             string
@@ -70,13 +81,17 @@ func GetMessageBusAddress(runtimePath string) (string, error) {
 	return strings.TrimRight(address, "/") + APIMessageBus, nil
 }
 
-func PublishEventInSocket(ctx context.Context, SourceID string, Name string, properties map[string]string) (*http.Response, error) {
-	socketPath := "/tmp/message-bus.sock"
+// PublishEventInSocket posts an event to the message bus through its unix
+// socket in runtimePath. The response comes back with its body closed.
+func PublishEventInSocket(ctx context.Context, runtimePath, sourceID, name string, properties map[string]string) (*http.Response, error) {
+	socketPath := MessageBusSocketPath(runtimePath)
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", socketPath)
+				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
 			},
+			// A transport per call: an idle connection kept alive would be leaked.
+			DisableKeepAlives: true,
 		},
 	}
 
@@ -85,8 +100,8 @@ func PublishEventInSocket(ctx context.Context, SourceID string, Name string, pro
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST",
-		fmt.Sprintf("http://unix/v2/message_bus/event/%s/%s", SourceID, Name),
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("http://unix/v2/message_bus/event/%s/%s", sourceID, name),
 		bytes.NewBuffer(body),
 	)
 	if err != nil {
