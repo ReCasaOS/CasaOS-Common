@@ -62,7 +62,7 @@ func NewSshConn(cols, rows int, sshClient *ssh.Client) (*SshConn, error) {
 		ssh.TTY_OP_OSPEED: 14400, // output speed = 14.4kbaud
 	}
 	// Request pseudo terminal
-	if err := sshSession.RequestPty("xterm", rows, cols, modes); err != nil {
+	if err := sshSession.RequestPty("xterm-256color", rows, cols, modes); err != nil {
 		return nil, err
 	}
 	// Start remote shell
