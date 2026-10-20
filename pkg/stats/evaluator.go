@@ -50,11 +50,12 @@ type Evaluator struct {
 	path  string
 	emit  func(Event)
 
-	mu      sync.Mutex // guards the fields below
-	items   map[string]*itemState
-	saved   []byte        // content of the file on disk
-	saveErr error         // error of the last write, nil once the file matches
-	emitted chan struct{} // closed once the emits of the latest state change are done; nil = none
+	mu       sync.Mutex // guards the fields below
+	items    map[string]*itemState
+	saved    []byte  // content of the file on disk
+	saveErr  error   // error of the last write, nil once the file matches
+	pending  []Event // made by state changes, not yet emitted, in order
+	draining bool    // a call is emitting pending
 }
 
 // maxRun caps a run at the longest rule window: a longer run counts the same.
@@ -345,30 +346,56 @@ func (e *Evaluator) fire(item string, st *itemState, key string, sinceMin int64,
 	return Event{item, key, "firing", v, time.Unix(sinceMin*60, 0).UTC()}
 }
 
-// do runs fn under e.mu, then emits its events outside the lock, after the
-// events of every earlier state change: a slow emit delays the later emits,
-// never a state change or a read.
+// do runs fn under e.mu and queues its events in the same section, so the
+// queue follows the order of the state changes. The call that finds no one
+// emitting becomes the drainer: it emits the queue, outside every lock, until
+// it is empty, including the events queued meanwhile by other calls or by emit
+// itself. A slow emit delays later events only; a call that re-enters from
+// emit queues and returns.
 func (e *Evaluator) do(fn func() []Event) {
-	var prev, mine chan struct{}
-	evs := func() []Event {
+	drain := func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		evs := fn()
-		if len(evs) > 0 {
-			prev, mine = e.emitted, make(chan struct{})
-			e.emitted = mine
+		e.pending = append(e.pending, fn()...)
+		if e.draining || len(e.pending) == 0 {
+			return false
 		}
-		return evs
+		e.draining = true
+		return true
 	}()
-	if mine == nil {
-		return
+	if drain {
+		e.drain()
 	}
-	defer close(mine)
-	if prev != nil {
-		<-prev
-	}
-	for _, ev := range evs {
-		e.emit(ev)
+}
+
+// drain emits the queue until it is empty. If emit panics, the event it was
+// given counts as emitted, the rest of the batch goes back to the front of the
+// queue and the next call becomes the drainer; the panic goes on to the caller.
+func (e *Evaluator) drain() {
+	var batch []Event
+	defer func() {
+		if batch == nil {
+			return
+		}
+		e.mu.Lock()
+		e.pending = append(slices.Clone(batch[1:]), e.pending...)
+		e.draining = false
+		e.mu.Unlock()
+	}()
+	for {
+		e.mu.Lock()
+		if len(e.pending) == 0 {
+			e.draining = false
+			e.mu.Unlock()
+			return
+		}
+		batch, e.pending = e.pending, nil
+		e.mu.Unlock()
+		for len(batch) > 0 {
+			e.emit(batch[0])
+			batch = batch[1:]
+		}
+		batch = nil
 	}
 }
 
