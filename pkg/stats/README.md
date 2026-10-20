@@ -4,14 +4,23 @@ Per-item resource statistics: 15 minutes at 5 s in memory, 7 days of minutes on 
 
 ## Format and limits
 
-One fixed-size ring file per item, `<hash of the item>.ring`. A query never waits for the writer: it takes a read lock on the item map only and reads the ring file without the writer's lock.
+One fixed-size ring file per item, `<hash of the item>.ring`. A query never waits for an item's writer: it reads the ring file without the writer's lock. It does take the store read lock for the lookup, so it can wait behind the creation of an item (two fsyncs under the store lock), `Forget` and `Sweep`, which hold that lock.
 
 - Layout: an 8192-byte header area (two header copies, format version 1, item name, series keys), then columns of `Minutes` (10 080) cells. Column 0 holds the minute stamps (4 bytes each); every series adds three columns (avg, min, max; float32). A cell holds no value when its stamp does not match the minute.
 - Size is a pure function of the series count: `8192 + 40320 x (1 + 3 x series)` bytes. It never changes while the ring wraps.
 - Bounds: 48 series per item (a typical container with 24 series is 2 951 552 bytes, about 2.8 MiB; the maximum is 5 854 592 bytes, 5.6 MiB), series key at most 63 bytes, item name at most 256 bytes, 256 live items plus at most 256 forgotten items.
 - Worst case for the directory: (256 live + 256 forgotten) x 5.6 MiB = 2.8 GiB. Realistic case: 41 items of 24 series, about 115 MiB.
+- File handles: each ring keeps one open handle for the life of the store (up to 512 with the forgotten items); the service's `LimitNOFILE` (or ulimit) must allow it.
 - Memory: 180 live slots per series, no growth with time.
 - `*.ring.bad` (a quarantined file) is kept once per item; `alerts.json` only holds items that differ from defaults or are active, and is pruned with the store.
+
+## Series keys and partial errors
+
+A ring never frees a series slot. Once an item has seen 48 distinct keys, every new key is rejected for the life of the item, so key suffixes MUST be stable: a MAC address or an index, never a name that changes at each start (libvirt `vnetN`, host veth names).
+
+`Record` returns an error wrapping `ErrSeriesCap` or `ErrBadKey` when some keys of a sample were rejected; the other keys were stored. This is PARTIAL, not a failure: do not retry and do not drop the sample. `stats.IsPartial(err)` is true exactly for such errors (and false if a real failure, such as a write error, is joined to them).
+
+Other behaviour: negative values are stored as given (services clamp what must not be negative); item names must be valid UTF-8 (`ErrBadItem` otherwise, from `Record` and `SetRules`); `Sweep` also removes live items silent for 7 days, and `Prune` then drops their rules.
 
 ## How to wire
 
@@ -35,7 +44,7 @@ Notes:
 
 ## Extensions
 
-Beyond the base contract: `SetOnMinute` (the single hook), `Evaluator.Resolve`, `Evaluator.Prune`, `Evaluator.LastError`, `SystemClock` and `FakeClock`, `Store.Quarantined`, the exported errors (`ErrUnknownItem`, `ErrBadRange`, `ErrBadItem`, `ErrBadKey`, `ErrSeriesCap`, `ErrTooManyItems`, `ErrOutOfOrder`, `ErrClosed`, `*RuleError`), the exported constants (`Minutes`, `LiveSlots`, `MaxSeries`, `MaxItems`, `MaxForgotten`, `MaxKeyLen`, `MaxItemLen`, `FormatVersion`, `MaxFileSize`) and `SplitKey`. Query results: series of chart `alert` are never returned, a series with no data in the window is omitted, `live` points have Min = Max = Avg, floats are stored as float32.
+Beyond the base contract: `SetOnMinute` (the single hook), `Evaluator.Resolve`, `Evaluator.Prune`, `Evaluator.LastError`, `SystemClock` and `FakeClock`, `Store.Quarantined` and `Store.Skipped`, the exported errors (`ErrUnknownItem`, `ErrBadRange`, `ErrBadItem`, `ErrBadKey`, `ErrSeriesCap`, `ErrTooManyItems`, `ErrOutOfOrder`, `ErrClosed`, `*RuleError`), the exported constants (`Minutes`, `LiveSlots`, `MaxSeries`, `MaxItems`, `MaxForgotten`, `MaxKeyLen`, `MaxItemLen`, `FormatVersion`, `MaxFileSize`) and `SplitKey`, `IsPartial`. At `Open`, a ring file that cannot be read for a reason other than corruption (read-only, dangling symlink, symlink to a directory, I/O error) is left in place and listed by `Skipped()`; `Open` carries on with the other items. A quarantined `*.ring.bad` gets the time of the quarantine as its mtime, so it is kept 7 days from then. Query results: series of chart `alert` are never returned, a series with no data in the window is omitted, `live` points have Min = Max = Avg, floats are stored as float32.
 
 ## Measured cost
 
