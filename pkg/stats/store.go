@@ -156,7 +156,7 @@ func (s *Store) minuteValue(item, key string, minute int64) (avg float64, ok boo
 	if e == nil {
 		return 0, false, nil
 	}
-	cells, err := e.ring.readWindow(minute, minute)
+	cells, err := e.ring.readWindow(minute, minute, key)
 	if err != nil {
 		return 0, false, err
 	}

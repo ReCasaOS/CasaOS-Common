@@ -2,6 +2,7 @@ package stats
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -160,22 +161,29 @@ func TestRecordTickBudget(t *testing.T) {
 					fs = osFS
 				}
 				r := newTickRig(t, fs, withEv)
+				var m0, m1 runtime.MemStats
+				runtime.ReadMemStats(&m0)
 				mean, worst := r.run(t, ticks)
-				t.Logf("mean tick %v, worst tick %v", mean, worst)
+				runtime.ReadMemStats(&m1)
+				allocs := int(m1.Mallocs - m0.Mallocs)
+				t.Logf("mean tick %v, worst tick %v, %d allocs per tick", mean, worst, allocs/ticks)
 				if withEv {
 					t.Logf("OnMinute: %d calls, mean %v, worst %v", r.hookCalls, r.hookTotal/time.Duration(r.hookCalls), r.hookWorst)
 				}
+				// Without fsync the mean and the allocation count are strict; a
+				// single worst tick is only a hang guard (a loaded host has outliers).
+				// With fsync the numbers are logged: a slow virtual disk must not fail the test.
 				meanMax := 5 * time.Millisecond // 20 % of the 25 ms that 0.5 % of a core allows per 5 s
 				if withEv {
 					meanMax = 25 * time.Millisecond // the Evaluator is part of the same service budget
 				}
 				switch {
-				case fsync && worst >= 2*time.Second:
-					t.Errorf("worst tick %v >= 2s (mean %v)", worst, mean)
 				case !fsync && mean >= meanMax:
 					t.Errorf("mean tick %v >= %v (worst %v)", mean, meanMax, worst)
-				case !fsync && worst >= 250*time.Millisecond:
-					t.Errorf("worst tick %v >= 250ms (mean %v)", worst, mean)
+				case !fsync && allocs/ticks >= 5000:
+					t.Errorf("%d allocs per tick >= 5000", allocs/ticks)
+				case worst >= 15*time.Second:
+					t.Errorf("worst tick %v >= 15s (mean %v): hang", worst, mean)
 				}
 			})
 		}

@@ -33,6 +33,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -401,7 +402,9 @@ func readFull(f file, b []byte, off int64) error {
 // the same stamp before and after and may build one point of that response
 // from columns of both writes (avg of one, min of the other). Nothing wrong is
 // persisted; the next query reads the second write whole.
-func (r *ring) readWindow(fromMin, toMin int64) (map[string][]minuteCell, error) {
+//
+// With only, just those series are read (and returned, if the ring has them).
+func (r *ring) readWindow(fromMin, toMin int64, only ...string) (map[string][]minuteCell, error) {
 	n := toMin - fromMin + 1
 	if n < 1 || n > Minutes {
 		return nil, fmt.Errorf("stats: window of %d minutes", n)
@@ -432,7 +435,10 @@ func (r *ring) readWindow(fromMin, toMin int64) (map[string][]minuteCell, error)
 		return nil, err
 	}
 	cols := make([][3][]byte, len(keys))
-	for i := range keys {
+	for i, k := range keys {
+		if len(only) > 0 && !slices.Contains(only, k) {
+			continue
+		}
 		for c := 0; c < 3; c++ {
 			if cols[i][c], err = readCol(colOff(i, c)); err != nil {
 				return nil, err
@@ -445,6 +451,9 @@ func (r *ring) readWindow(fromMin, toMin int64) (map[string][]minuteCell, error)
 	}
 	res := make(map[string][]minuteCell, len(keys))
 	for i, k := range keys {
+		if len(only) > 0 && !slices.Contains(only, k) {
+			continue
+		}
 		cells := make([]minuteCell, n)
 		for j := int64(0); j < n; j++ {
 			want := uint32(fromMin + j)
