@@ -147,6 +147,25 @@ func (s *Store) SetOnMinute(fn func(item string, minute time.Time)) {
 	s.mu.Unlock()
 }
 
+// minuteValue returns the average of key in the given unix minute of item;
+// ok is false when that minute does not hold the series.
+func (s *Store) minuteValue(item, key string, minute int64) (avg float64, ok bool, err error) {
+	s.mu.RLock()
+	e := s.items[item]
+	s.mu.RUnlock()
+	if e == nil {
+		return 0, false, nil
+	}
+	cells, err := e.ring.readWindow(minute, minute)
+	if err != nil {
+		return 0, false, err
+	}
+	if c := cells[key]; len(c) == 1 && c[0].OK {
+		return c[0].Avg, true, nil
+	}
+	return 0, false, nil
+}
+
 // entry returns the live entry of name, creating or reviving it.
 // ponytail: create and revive do their I/O under the store lock; it happens
 // once per item lifetime, a finer lock is not worth it.
