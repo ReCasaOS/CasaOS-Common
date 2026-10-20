@@ -61,9 +61,10 @@ type agg struct {
 func Open(dir string, clock Clock) (*Store, error) { return open(dir, clock, osFS) }
 
 func open(dir string, clock Clock, fs fsys) (*Store, error) {
-	if err := fs.MkdirAll(dir, 0o755); err != nil {
+	if err := fs.MkdirAll(dir, dirMode); err != nil {
 		return nil, err
 	}
+	fs.Restrict(dir, dirMode) // MkdirAll leaves an existing directory as it was
 	ents, err := fs.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -77,6 +78,9 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 		case strings.HasSuffix(name, ".ring.tmp"):
 			_ = fs.Remove(p) // a leftover of an interrupted create; best effort
 		case strings.HasSuffix(name, ".ring"):
+			if e.Type().IsRegular() {
+				fs.Restrict(p, fileMode)
+			}
 			r, err := openRing(fs, p)
 			if err == nil && filepath.Base(ringPath(dir, r.item)) != name {
 				_ = r.Close()

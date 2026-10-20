@@ -67,13 +67,15 @@ func NewEvaluator(store *Store, dir string, emit func(Event)) (*Evaluator, error
 }
 
 func newEvaluator(store *Store, dir string, emit func(Event), fs fsys) (*Evaluator, error) {
-	if err := fs.MkdirAll(dir, 0o755); err != nil {
+	if err := fs.MkdirAll(dir, dirMode); err != nil {
 		return nil, err
 	}
+	fs.Restrict(dir, dirMode)
 	if emit == nil {
 		emit = func(Event) {}
 	}
 	e := &Evaluator{store: store, fs: fs, path: filepath.Join(dir, "alerts.json"), emit: emit, items: map[string]*itemState{}}
+	e.fs.Restrict(e.path, fileMode) // so that a move to alerts.json.bad keeps it private
 	b, err := readFile(e.fs, e.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return e, nil
@@ -400,10 +402,11 @@ func (e *Evaluator) save() {
 // writeFileAtomic writes path through path.tmp, fsync and rename.
 func writeFileAtomic(fs fsys, path string, b []byte) error {
 	tmp := path + ".tmp"
-	f, err := fs.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := fs.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
 	if err != nil {
 		return err
 	}
+	fs.Restrict(tmp, fileMode) // a leftover keeps its old mode through O_TRUNC
 	_, err = f.WriteAt(b, 0)
 	if err == nil {
 		err = f.Sync()

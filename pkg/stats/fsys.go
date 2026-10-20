@@ -25,7 +25,14 @@ type fsys interface {
 	MkdirAll(dir string, perm os.FileMode) error
 	SyncDir(dir string) error
 	Chtimes(name string, t time.Time) error // best effort
+	Restrict(name string, perm os.FileMode) // best effort: clears the mode bits of name outside perm
 }
+
+// Item, container, VM and interface names are in the files: no access for other users.
+const (
+	dirMode  os.FileMode = 0o750
+	fileMode os.FileMode = 0o640
+)
 
 type osFileSystem struct{}
 
@@ -55,3 +62,13 @@ func (osFileSystem) SyncDir(dir string) error {
 }
 
 func (osFileSystem) Chtimes(name string, t time.Time) error { return os.Chtimes(name, t, t) }
+
+// Restrict ignores every error, and Windows, which has no such modes.
+func (osFileSystem) Restrict(name string, perm os.FileMode) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if fi, err := os.Stat(name); err == nil && fi.Mode().Perm()&^perm != 0 {
+		_ = os.Chmod(name, fi.Mode().Perm()&perm)
+	}
+}

@@ -12,6 +12,7 @@ One fixed-size ring file per item, `<hash of the item>.ring`. A query never wait
 - Worst case for the directory: (256 live + 256 forgotten) x 5.6 MiB = 2.8 GiB. Realistic case: 41 items of 24 series, about 115 MiB.
 - File handles: each ring keeps one open handle for the life of the store (up to 512 with the forgotten items); the service's `LimitNOFILE` (or ulimit) must allow it.
 - Memory: 180 live slots per series, no growth with time.
+- Modes: the directory is created 0750 and every file the package writes (`*.ring`, `alerts.json`, their `.tmp` and `.bad`) 0640, since they hold container, VM and interface names. `Open` narrows an existing directory and existing `*.ring` files to these modes (best effort, an error is ignored); `NewEvaluator` does the same for an existing `alerts.json`. Windows ignores modes.
 - `*.ring.bad` (a quarantined file) is kept once per item; `alerts.json` only holds items that differ from defaults or are active, and is pruned with the store.
 
 ## Series keys and partial errors
@@ -49,6 +50,8 @@ Beyond the base contract: `SetOnMinute` (the single hook), `Evaluator.Resolve`, 
 Added in v0.4.29:
 
 - `Store.Unreadable(item)` is true exactly when a `Record` of item returns `ErrRingSkipped` (its ring file was left in place at `Open` as unreadable). It is false for a healthy or unknown item and for a corrupt file `Open` could not move aside, which `Record` replaces. A service needs no copy of the ring file naming rule.
+
+- File modes 0750 (directory) and 0640 (files), existing ones narrowed at `Open`: see [Format and limits](#format-and-limits).
 
 ## Measured cost
 
