@@ -249,3 +249,158 @@ func TestPruneKeepsStateCreatedDuringIt(t *testing.T) {
 		t.Fatalf("state pruned: %+v", st)
 	}
 }
+
+// within runs fn and fails the test if it does not return in 10 s.
+func within(t *testing.T, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); fn() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: still blocked after 10 s", what)
+	}
+}
+
+// emitRig is a store with one high minute of evItem and an evaluator whose
+// emit logs each event, then calls hook (if set) with it.
+type emitRig struct {
+	s    *Store
+	ev   *Evaluator
+	mu   sync.Mutex
+	log  []string
+	hook func(Event)
+}
+
+func newEmitRig(t *testing.T) *emitRig {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := open(dir, NewFakeClock(minuteAt(1)), osFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	feedMinute(t, s, evItem, minuteAt(0), high)
+	r := &emitRig{s: s}
+	r.ev, err = newEvaluator(s, dir, func(e Event) {
+		r.mu.Lock()
+		r.log = append(r.log, e.Item+" "+e.Key+" "+e.State)
+		hook := r.hook
+		r.mu.Unlock()
+		if hook != nil {
+			hook(e)
+		}
+	}, osFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetOnMinute(r.ev.OnMinute)
+	return r
+}
+
+func (r *emitRig) events() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.log)
+}
+
+var cpu50 = []Rule{{Key: "cpu_high", Enabled: true, Threshold: 50, Minutes: 1}}
+
+// Emits come in the order of the state changes, across items, even when an
+// emit is slow; meanwhile no state change, read or Record waits for it.
+func TestEmitOrderFollowsStateChanges(t *testing.T) {
+	r := newEmitRig(t)
+	if err := r.ev.SetRules("other", cpu50); err != nil { // no history yet: nothing fires
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	r.hook = func(e Event) {
+		if e.Item == evItem && e.State == "firing" {
+			once.Do(func() { close(entered); <-release })
+		}
+	}
+	aDone := make(chan struct{})
+	go func() { // A: a rule change fires; its emit blocks
+		defer close(aDone)
+		if err := r.ev.SetRules(evItem, cpu50); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rule change did not fire")
+	}
+	within(t, "Resolve", func() { r.ev.Resolve(evItem) })
+	within(t, "Rules and Active", func() { _, _ = r.ev.Rules(evItem), r.ev.Active(evItem) })
+	within(t, "Record of another item whose minute fires", func() {
+		feedMinute(t, r.s, "other", minuteAt(0), high)
+	})
+	if got := r.events(); len(got) != 1 {
+		t.Fatalf("emitted while the first emit was blocked: %q", got)
+	}
+	close(release)
+	within(t, "the blocked rule change", func() { <-aDone })
+	want := []string{evItem + " cpu_high firing", evItem + " cpu_high resolved", "other cpu_high firing"}
+	if got := r.events(); !slices.Equal(got, want) {
+		t.Fatalf("emit order %q, want %q", got, want)
+	}
+}
+
+// An emit may call back into the Evaluator: no hang, every event delivered in order.
+func TestEmitMayReenter(t *testing.T) {
+	r := newEmitRig(t)
+	r.hook = func(e Event) {
+		switch e.State {
+		case "firing":
+			r.ev.Resolve(e.Item)
+		case "resolved":
+			_ = r.ev.SetRules(e.Item, []Rule{{Key: "cpu_high", Enabled: true, Threshold: 99, Minutes: 1}})
+			r.ev.Rebuild(e.Item)
+		}
+	}
+	within(t, "SetRules with a re-entrant emit", func() {
+		if err := r.ev.SetRules(evItem, cpu50); err != nil {
+			t.Error(err)
+		}
+	})
+	want := []string{evItem + " cpu_high firing", evItem + " cpu_high resolved"}
+	if got := r.events(); !slices.Equal(got, want) {
+		t.Fatalf("events %q, want %q", got, want)
+	}
+	if a := r.ev.Active(evItem); len(a) != 0 {
+		t.Fatalf("Active %+v", a)
+	}
+}
+
+// An emit that panics: the panic reaches the caller, the event it was given
+// counts as emitted, the rest of its batch goes back to the front of the queue
+// (before what was queued meanwhile) and the next call emits it.
+func TestEmitPanicHandsOver(t *testing.T) {
+	r := newEmitRig(t)
+	var once sync.Once
+	r.hook = func(e Event) {
+		once.Do(func() {
+			r.ev.Resolve(evItem) // queued behind mem_high firing
+			panic("emit")
+		})
+	}
+	both := []Rule{cpu50[0], {Key: "mem_high", Enabled: true, Threshold: 50, Minutes: 1}}
+	within(t, "SetRules with a panicking emit", func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic of emit was swallowed")
+			}
+		}()
+		_ = r.ev.SetRules(evItem, both)
+	})
+	within(t, "a call after the panic", func() { r.ev.Resolve(evItem) }) // no events of its own: it drains
+	want := []string{
+		evItem + " cpu_high firing", evItem + " mem_high firing",
+		evItem + " cpu_high resolved", evItem + " mem_high resolved",
+	}
+	if got := r.events(); !slices.Equal(got, want) {
+		t.Fatalf("events %q, want %q", got, want)
+	}
+}

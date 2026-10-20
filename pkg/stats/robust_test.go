@@ -56,6 +56,9 @@ func TestOpenSkipsUnreadableRing(t *testing.T) {
 		if len(s.Quarantined()) != 0 {
 			t.Fatalf("Quarantined=%q", s.Quarantined())
 		}
+		if !s.Unreadable("x") || s.Unreadable("y") || s.Unreadable("unknown") {
+			t.Fatalf("Unreadable x=%v y=%v unknown=%v", s.Unreadable("x"), s.Unreadable("y"), s.Unreadable("unknown"))
+		}
 	}
 	t.Run("open error", func(t *testing.T) {
 		dir := t.TempDir()
@@ -101,6 +104,39 @@ func TestOpenSkipsUnreadableRing(t *testing.T) {
 		}
 		check(t, s, filepath.Base(link))
 	})
+}
+
+// A corrupt file that could not be quarantined is skipped but replaceable:
+// Record recreates it, so it is not unreadable.
+func TestUnreadableExcludesReplaceableCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(ringPath(dir, "x"), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := open(dir, NewFakeClock(t0), noRenameFS{osFS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if len(s.Skipped()) != 1 {
+		t.Fatalf("Skipped=%q", s.Skipped())
+	}
+	if s.Unreadable("x") {
+		t.Fatal("replaceable corrupt file reported unreadable")
+	}
+	if err := s.Record("x", t0, Sample{"cpu/user": 1}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+}
+
+type noRenameFS struct{ fsys }
+
+// Rename fails for a quarantine (to *.bad) only.
+func (n noRenameFS) Rename(a, b string) error {
+	if strings.HasSuffix(b, ".bad") {
+		return os.ErrPermission
+	}
+	return n.fsys.Rename(a, b)
 }
 
 type denyOpenFS struct {

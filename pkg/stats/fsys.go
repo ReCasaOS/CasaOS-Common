@@ -3,6 +3,7 @@ package stats
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -25,7 +26,14 @@ type fsys interface {
 	MkdirAll(dir string, perm os.FileMode) error
 	SyncDir(dir string) error
 	Chtimes(name string, t time.Time) error // best effort
+	Restrict(name string, perm os.FileMode) // best effort: clears the mode bits of name outside perm; never follows a symlink
 }
+
+// Item, container, VM and interface names are in the files: no access for other users.
+const (
+	dirMode  os.FileMode = 0o750
+	fileMode os.FileMode = 0o640
+)
 
 type osFileSystem struct{}
 
@@ -55,3 +63,26 @@ func (osFileSystem) SyncDir(dir string) error {
 }
 
 func (osFileSystem) Chtimes(name string, t time.Time) error { return os.Chtimes(name, t, t) }
+
+// mkdirPrivate creates dir (missing parents 0755, dir itself dirMode) and
+// narrows dir if it already existed: MkdirAll leaves an existing one as it was.
+func mkdirPrivate(fs fsys, dir string) error {
+	if err := fs.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return err
+	}
+	if err := fs.MkdirAll(dir, dirMode); err != nil {
+		return err
+	}
+	fs.Restrict(dir, dirMode)
+	return nil
+}
+
+// Restrict ignores every error, symlinks, and Windows, which has no such modes.
+func (osFileSystem) Restrict(name string, perm os.FileMode) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if fi, err := os.Lstat(name); err == nil && fi.Mode()&os.ModeSymlink == 0 && fi.Mode().Perm()&^perm != 0 {
+		_ = os.Chmod(name, fi.Mode().Perm()&perm)
+	}
+}

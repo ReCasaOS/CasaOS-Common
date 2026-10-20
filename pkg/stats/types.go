@@ -9,6 +9,9 @@
 // is true means the other keys of the sample were stored. One known limit: after a clock step
 // back of more than a minute, a query overlapping the rewrite of the same
 // minute may mix that minute's columns in one point of one response.
+//
+// The directory is 0750 and the files 0640: they name containers, VMs and
+// interfaces. The Evaluator emits events in the order of its state changes.
 package stats
 
 import (

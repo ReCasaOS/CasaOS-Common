@@ -231,7 +231,7 @@ func createRing(fs fsys, path, item string) (*ring, error) {
 		return nil, ErrBadItem
 	}
 	tmp := path + ".tmp"
-	f, err := fs.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o644)
+	f, err := fs.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_RDWR, fileMode)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +260,7 @@ func createRing(fs fsys, path, item string) (*ring, error) {
 }
 
 func openRing(fs fsys, path string) (*ring, error) {
-	f, err := fs.OpenFile(path, os.O_RDWR, 0o644)
+	f, err := fs.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
 	}

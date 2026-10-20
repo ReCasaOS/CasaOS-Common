@@ -12,6 +12,7 @@ One fixed-size ring file per item, `<hash of the item>.ring`. A query never wait
 - Worst case for the directory: (256 live + 256 forgotten) x 5.6 MiB = 2.8 GiB. Realistic case: 41 items of 24 series, about 115 MiB.
 - File handles: each ring keeps one open handle for the life of the store (up to 512 with the forgotten items); the service's `LimitNOFILE` (or ulimit) must allow it.
 - Memory: 180 live slots per series, no growth with time.
+- Modes: the directory is created 0750 and every file the package writes (`*.ring`, `alerts.json`, their `.tmp` and `.bad`) 0640, since they hold container, VM and interface names. `Open` narrows an existing directory and existing `*.ring` files to these modes (best effort, an error is ignored); `NewEvaluator` does the same for its directory and an existing `alerts.json`. Missing parent directories are created 0755. A symlink is never followed for this (the directory or a file that is a symlink keeps its target's mode). A `*.ring.bad` or `alerts.json.bad` made before this version keeps its old mode; the 0750 directory covers it. Windows ignores modes.
 - `*.ring.bad` (a quarantined file) is kept once per item; `alerts.json` only holds items that differ from defaults or are active, and is pruned with the store.
 
 ## Series keys and partial errors
@@ -26,7 +27,7 @@ Other behaviour: negative values are stored as given (services clamp what must n
 
 ```go
 st, _ := stats.Open(dir, stats.SystemClock{})
-ev, _ := stats.NewEvaluator(st, dir, emit) // emit(Event) must not block
+ev, _ := stats.NewEvaluator(st, dir, emit) // emit(Event) should not block; it may call the Evaluator
 st.SetOnMinute(ev.OnMinute)                // the only wiring; services never call OnMinute
 // at start, per item that has history:   ev.Rebuild(item)
 // every 5 s, per item:                   st.Record(item, now, sample)
@@ -40,11 +41,21 @@ Notes:
 - Use one sampling goroutine per item. `Record` calls for one item from two goroutines are safe for the data, but the `OnMinute` hooks they trigger can run out of order.
 - A `Record` that crosses a minute boundary commits the previous minute at the cost of two fsyncs per item; see [Cost](#cost) before sampling many items from one goroutine.
 - `Prune` drops the rules and state of every item no longer in the store, including an item that has rules but never recorded.
+- Events are emitted in the order of the state changes that made them, across items, outside every lock. Each state change queues its events; the call that finds no one emitting becomes the drainer and emits the queue until it is empty, so one goroutine (a `Record`, a route's `SetRules`) may emit events made by other goroutines. A slow `emit` delays the later events only, never a state change, a read or another call, which queues and returns. `emit` may call back into the Evaluator (`Resolve`, `SetRules`, `Rebuild`): its events are queued and emitted after the current `emit` returns. If `emit` panics, the panic reaches the drainer's caller, the event it was given counts as emitted, the rest go back to the front of the queue and the next call that changes or evaluates state (`SetRules`, `Rebuild`, `Resolve`, `OnMinute`; not `Prune`, which changes state but does not drain) emits them.
+- `Resolve`, `SetRules`, `Rebuild` and `Record`/`OnMinute` can return BEFORE their own events have been emitted: when another goroutine is draining the queue, or after a panic in `emit` until a later call drains the leftovers. There is no flush at shutdown: a caller that does `ev.Resolve(item); st.Forget(item)` and then exits can lose the `resolved` event. A caller that needs its events delivered waits for them itself (for example in its `emit`).
 - `Evaluator.LastError()` returns the error of the last write of `alerts.json` (nil once a later write succeeds); the service can log or expose it.
 
 ## Extensions
 
 Beyond the base contract: `SetOnMinute` (the single hook), `Evaluator.Resolve`, `Evaluator.Prune`, `Evaluator.LastError`, `SystemClock` and `FakeClock`, `Store.Quarantined` and `Store.Skipped`, `ErrRingSkipped`, the exported errors (`ErrUnknownItem`, `ErrBadRange`, `ErrBadItem`, `ErrBadKey`, `ErrSeriesCap`, `ErrTooManyItems`, `ErrOutOfOrder`, `ErrClosed`, `*RuleError`), the exported constants (`Minutes`, `LiveSlots`, `MaxSeries`, `MaxItems`, `MaxForgotten`, `MaxKeyLen`, `MaxItemLen`, `FormatVersion`, `MaxFileSize`) and `SplitKey`, `IsPartial`. At `Open`, a ring file that cannot be read for a reason other than corruption (read-only, dangling symlink, symlink to a directory, I/O error) is left in place and listed by `Skipped()`; `Open` carries on with the other items, and a `Record` of a skipped item returns `ErrRingSkipped` (new exported error, a full failure for that item whose text names the file; never partial) instead of replacing the file, so a temporary EACCES/EIO cannot destroy its history; the next `Open` that can read the file picks it up. A corrupt file that could not be moved to `*.bad` is also listed by `Skipped()` but is replaced by the next `Record`. A quarantined `*.ring.bad` gets the time of the quarantine as its mtime, so it is kept 7 days from then. Query results: series of chart `alert` are never returned, a series with no data in the window is omitted, `live` points have Min = Max = Avg, floats are stored as float32.
+
+Added in v0.4.29:
+
+- `Store.Unreadable(item)` is true exactly when a `Record` of item returns `ErrRingSkipped` (its ring file was left in place at `Open` as unreadable). It is false for a healthy or unknown item and for a corrupt file `Open` could not move aside, which `Record` replaces. A service needs no copy of the ring file naming rule.
+
+- File modes 0750 (directory) and 0640 (files), existing ones narrowed at `Open`: see [Format and limits](#format-and-limits).
+
+- Emit order: events are queued and emitted in the order of the state changes, by one drainer at a time, and `emit` may re-enter; see the notes of [How to wire](#how-to-wire).
 
 ## Measured cost
 

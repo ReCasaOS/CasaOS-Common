@@ -50,10 +50,12 @@ type Evaluator struct {
 	path  string
 	emit  func(Event)
 
-	mu      sync.Mutex // guards the fields below
-	items   map[string]*itemState
-	saved   []byte // content of the file on disk
-	saveErr error  // error of the last write, nil once the file matches
+	mu       sync.Mutex // guards the fields below
+	items    map[string]*itemState
+	saved    []byte  // content of the file on disk
+	saveErr  error   // error of the last write, nil once the file matches
+	pending  []Event // made by state changes, not yet emitted, in order
+	draining bool    // a call is emitting pending
 }
 
 // maxRun caps a run at the longest rule window: a longer run counts the same.
@@ -61,19 +63,25 @@ const maxRun = 120
 
 // NewEvaluator loads <dir>/alerts.json. A missing file means defaults; an
 // unreadable, invalid or other-version file is moved to alerts.json.bad and
-// defaults are used. emit is called after the state is saved, outside every lock.
+// defaults are used. emit is called after the state is saved, outside every lock,
+// in the order of the state changes. Resolve, SetRules, Rebuild and OnMinute
+// (so Record) can return before their own events are emitted: when another
+// goroutine is emitting the queue, or after a panic in emit until a later
+// call (not Prune) drains the leftovers. There is no flush at shutdown; a
+// caller that needs its events delivered waits for them itself.
 func NewEvaluator(store *Store, dir string, emit func(Event)) (*Evaluator, error) {
 	return newEvaluator(store, dir, emit, osFS)
 }
 
 func newEvaluator(store *Store, dir string, emit func(Event), fs fsys) (*Evaluator, error) {
-	if err := fs.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirPrivate(fs, dir); err != nil {
 		return nil, err
 	}
 	if emit == nil {
 		emit = func(Event) {}
 	}
 	e := &Evaluator{store: store, fs: fs, path: filepath.Join(dir, "alerts.json"), emit: emit, items: map[string]*itemState{}}
+	e.fs.Restrict(e.path, fileMode) // so that a move to alerts.json.bad keeps it private
 	b, err := readFile(e.fs, e.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return e, nil
@@ -231,6 +239,7 @@ func (e *Evaluator) SetRules(item string, rules []Rule) error {
 		if slices.Equal(merged, DefaultRules()) {
 			st.Rules = nil
 		}
+		e.items[item] = st // reconcile counts with the new rules; put drops it again if idle
 		return e.reconcile(item, st)
 	})
 	return nil
@@ -341,15 +350,56 @@ func (e *Evaluator) fire(item string, st *itemState, key string, sinceMin int64,
 	return Event{item, key, "firing", v, time.Unix(sinceMin*60, 0).UTC()}
 }
 
-// do runs fn under e.mu, then emits its events outside the lock.
+// do runs fn under e.mu and queues its events in the same section, so the
+// queue follows the order of the state changes. The call that finds no one
+// emitting becomes the drainer: it emits the queue, outside every lock, until
+// it is empty, including the events queued meanwhile by other calls or by emit
+// itself. A slow emit delays later events only; a call that re-enters from
+// emit queues and returns.
 func (e *Evaluator) do(fn func() []Event) {
-	evs := func() []Event {
+	drain := func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return fn()
+		e.pending = append(e.pending, fn()...)
+		if e.draining || len(e.pending) == 0 {
+			return false
+		}
+		e.draining = true
+		return true
 	}()
-	for _, ev := range evs {
-		e.emit(ev)
+	if drain {
+		e.drain()
+	}
+}
+
+// drain emits the queue until it is empty. If emit panics, the event it was
+// given counts as emitted, the rest of the batch goes back to the front of the
+// queue and the next call becomes the drainer; the panic goes on to the caller.
+func (e *Evaluator) drain() {
+	var batch []Event
+	defer func() {
+		if batch == nil {
+			return
+		}
+		e.mu.Lock()
+		e.pending = append(slices.Clone(batch[1:]), e.pending...)
+		e.draining = false
+		e.mu.Unlock()
+	}()
+	for {
+		e.mu.Lock()
+		if len(e.pending) == 0 {
+			e.draining = false
+			e.mu.Unlock()
+			return
+		}
+		batch, e.pending = e.pending, nil
+		e.mu.Unlock()
+		for len(batch) > 0 {
+			e.emit(batch[0])
+			batch = batch[1:]
+		}
+		batch = nil
 	}
 }
 
@@ -400,10 +450,11 @@ func (e *Evaluator) save() {
 // writeFileAtomic writes path through path.tmp, fsync and rename.
 func writeFileAtomic(fs fsys, path string, b []byte) error {
 	tmp := path + ".tmp"
-	f, err := fs.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := fs.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
 	if err != nil {
 		return err
 	}
+	fs.Restrict(tmp, fileMode) // a leftover keeps its old mode through O_TRUNC
 	_, err = f.WriteAt(b, 0)
 	if err == nil {
 		err = f.Sync()

@@ -61,7 +61,7 @@ type agg struct {
 func Open(dir string, clock Clock) (*Store, error) { return open(dir, clock, osFS) }
 
 func open(dir string, clock Clock, fs fsys) (*Store, error) {
-	if err := fs.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirPrivate(fs, dir); err != nil {
 		return nil, err
 	}
 	ents, err := fs.ReadDir(dir)
@@ -77,6 +77,7 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 		case strings.HasSuffix(name, ".ring.tmp"):
 			_ = fs.Remove(p) // a leftover of an interrupted create; best effort
 		case strings.HasSuffix(name, ".ring"):
+			fs.Restrict(p, fileMode)
 			r, err := openRing(fs, p)
 			if err == nil && filepath.Base(ringPath(dir, r.item)) != name {
 				_ = r.Close()
@@ -160,6 +161,16 @@ func (s *Store) Skipped() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.skipped)
+}
+
+// Unreadable reports whether the ring file of item was refused at Open: it
+// exists but could not be read, and a Record of item returns ErrRingSkipped
+// (unless ErrClosed or ErrTooManyItems comes first). A corrupt file that Open
+// could not move aside does not count: Record replaces it.
+func (s *Store) Unreadable(item string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refused[filepath.Base(ringPath(s.dir, item))]
 }
 
 // SetOnMinute sets the hook called once per item per committed minute.
