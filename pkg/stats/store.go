@@ -70,9 +70,8 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 			switch {
 			case errors.Is(err, errCorrupt) || errors.Is(err, errVersion):
 				_ = fs.Remove(p + ".bad")
-				if err := fs.Rename(p, p+".bad"); err != nil {
-					_ = s.closeAll()
-					return nil, err
+				if fs.Rename(p, p+".bad") != nil {
+					continue // left in place, unknown; a Record of its item recreates it
 				}
 				s.quarantined = append(s.quarantined, name)
 			case err != nil:
@@ -175,6 +174,9 @@ func (s *Store) Record(item string, at time.Time, smp Sample) error {
 	if len(item) < 1 || len(item) > MaxItemLen {
 		return ErrBadItem
 	}
+	if at.Unix() < 0 {
+		return nil // a pre-1970 clock has nothing worth storing
+	}
 	e, err := s.entry(item)
 	if err != nil {
 		return err
@@ -197,9 +199,6 @@ func (s *Store) Record(item string, at time.Time, smp Sample) error {
 func (e *entry) record(at time.Time, smp Sample) (int64, bool, error) {
 	if e.closed {
 		return 0, false, ErrClosed
-	}
-	if at.Unix() < 0 {
-		return 0, false, nil // a pre-1970 clock has nothing worth storing
 	}
 	if e.hasLast && at.Before(e.last) {
 		if e.last.Sub(at) <= time.Minute {

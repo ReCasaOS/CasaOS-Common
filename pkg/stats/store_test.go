@@ -9,9 +9,54 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// failFS fails file writes while failWrite is set, and Remove/Rename of
+// paths ending in failSuffix.
+type failFS struct {
+	fsys
+	failWrite  *atomic.Bool
+	failSuffix string
+}
+
+var errInjected = errors.New("injected failure")
+
+func (f failFS) OpenFile(name string, flag int, perm os.FileMode) (file, error) {
+	fl, err := f.fsys.OpenFile(name, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return failFile{fl, f.failWrite}, nil
+}
+
+func (f failFS) Remove(name string) error {
+	if f.failSuffix != "" && strings.HasSuffix(name, f.failSuffix) {
+		return errInjected
+	}
+	return f.fsys.Remove(name)
+}
+
+func (f failFS) Rename(a, b string) error {
+	if f.failSuffix != "" && strings.HasSuffix(b, f.failSuffix) {
+		return errInjected
+	}
+	return f.fsys.Rename(a, b)
+}
+
+type failFile struct {
+	file
+	failWrite *atomic.Bool
+}
+
+func (f failFile) WriteAt(b []byte, off int64) (int, error) {
+	if f.failWrite != nil && f.failWrite.Load() {
+		return 0, errInjected
+	}
+	return f.file.WriteAt(b, off)
+}
 
 func openTest(t *testing.T) (*Store, string) {
 	t.Helper()
@@ -189,6 +234,9 @@ func TestClockStepBackwards(t *testing.T) {
 	if err := s.Record("x", last.Add(-20*time.Second), Sample{"cpu/user": 100}); !errors.Is(err, ErrOutOfOrder) {
 		t.Fatalf("err=%v", err)
 	}
+	if err := s.Record("x", last.Add(-time.Minute), Sample{"cpu/user": 100}); !errors.Is(err, ErrOutOfOrder) {
+		t.Fatalf("exactly 60 s back: err=%v", err)
+	}
 	_, _, live := s.items["x"].live.snapshot(last)
 	if live["cpu/user"][179] != 6 || live["cpu/user"][175] != 5 {
 		t.Fatalf("live changed: %v", live["cpu/user"][170:])
@@ -196,6 +244,12 @@ func TestClockStepBackwards(t *testing.T) {
 	// Two hours earlier: a clock step. Accepted, pending and live dropped.
 	back := minuteAt(-120)
 	feedMinute(t, s, "x", back, valueThenNext("cpu/user", 7, 8))
+	_, _, old := s.items["x"].live.snapshot(minuteAt(5))
+	for i, v := range old["cpu/user"] {
+		if !math.IsNaN(v) {
+			t.Fatalf("pre-step live slot %d survived the reset: %v", i, v)
+		}
+	}
 	_, _, live = s.items["x"].live.snapshot(back.Add(time.Minute))
 	for i, v := range live["cpu/user"][:166] {
 		if !math.IsNaN(v) {
@@ -247,6 +301,16 @@ func TestRecordBefore1970DoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestRecordBefore1970CreatesNothing(t *testing.T) {
+	s, dir := openTest(t)
+	if err := s.Record("x", time.Unix(-3600, 0), Sample{"cpu/user": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 || len(s.Items()) != 0 {
+		t.Fatalf("files=%v items=%q", ents, s.Items())
+	}
+}
+
 func TestSeriesAppearsLater(t *testing.T) {
 	s, _ := openTest(t)
 	for i := 0; i < 5; i++ {
@@ -270,18 +334,81 @@ func TestSeriesAppearsLater(t *testing.T) {
 func TestSeriesCapAndBadKey(t *testing.T) {
 	s, _ := openTest(t)
 	smp := Sample{strings.Repeat("k", MaxKeyLen+1): 1}
-	for i := 0; i <= MaxSeries; i++ {
-		smp["c/s"+string(rune('A'+i))] = 1
+	var want []string
+	for i := 0; i < 2*MaxSeries; i++ {
+		k := fmt.Sprintf("c/s%02d", i)
+		smp[k] = 1
+		if i < MaxSeries {
+			want = append(want, k)
+		}
 	}
 	err := s.Record("x", minuteAt(0), smp)
 	if !errors.Is(err, ErrSeriesCap) || !errors.Is(err, ErrBadKey) {
 		t.Fatalf("err=%v", err)
 	}
-	if err := s.Record("x", minuteAt(1), Sample{"c/sA": 1}); err != nil {
+	if err := s.Record("x", minuteAt(1), Sample{"c/s00": 1}); err != nil {
 		t.Fatal(err)
+	}
+	if got := s.items["x"].ring.Keys(); !slices.Equal(got, want) {
+		t.Fatalf("kept keys %q", got)
+	}
+}
+
+// New keys spread over two samples of the same minute count against the cap
+// together, so the commit never meets more than MaxSeries keys.
+func TestSeriesCapCountsPendingKeys(t *testing.T) {
+	s, _ := openTest(t)
+	first, second := Sample{}, Sample{}
+	for i := 0; i < 40; i++ {
+		first[fmt.Sprintf("a/k%02d", i)] = 1
+		second[fmt.Sprintf("b/k%02d", i)] = 1
+	}
+	if err := s.Record("x", minuteAt(0), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Record("x", minuteAt(0).Add(5*time.Second), second); !errors.Is(err, ErrSeriesCap) {
+		t.Fatalf("err=%v", err)
+	}
+	if err := s.Record("x", minuteAt(1), Sample{"a/k00": 1}); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 	if n := len(s.items["x"].ring.Keys()); n != MaxSeries {
 		t.Fatalf("series=%d", n)
+	}
+}
+
+func TestCommitFailure(t *testing.T) {
+	var fail atomic.Bool
+	s, err := open(t.TempDir(), NewFakeClock(t0), failFS{fsys: noSync{osFS}, failWrite: &fail})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var calls []time.Time
+	s.SetOnMinute(func(_ string, m time.Time) { calls = append(calls, m) })
+	feedMinute(t, s, "x", minuteAt(0), constSample(Sample{"cpu/user": 1}))
+	fail.Store(true)
+	for k := 1; k < 12; k++ {
+		if err := s.Record("x", minuteAt(1).Add(time.Duration(k)*5*time.Second), Sample{"cpu/user": 2}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Record("x", minuteAt(2), Sample{"cpu/user": 3}); !errors.Is(err, errInjected) {
+		t.Fatalf("err=%v", err)
+	}
+	fail.Store(false)
+	if len(calls) != 1 || !calls[0].Equal(minuteAt(0)) {
+		t.Fatalf("calls=%v", calls)
+	}
+	_, _, live := s.items["x"].live.snapshot(minuteAt(2))
+	if v := live["cpu/user"][179]; v != 3 {
+		t.Fatalf("live slot after failed commit: %v", v)
+	}
+	// The failed minute is a gap and the dropped pending is not written later.
+	feedMinute(t, s, "x", minuteAt(2), constSample(Sample{"cpu/user": 3}))
+	c := cellsOf(t, s, "x", 0, 2)["cpu/user"]
+	if !c[0].OK || c[1].OK || !c[2].OK || c[2].Avg != 3 {
+		t.Fatalf("cells %+v", c)
 	}
 }
 
@@ -358,6 +485,30 @@ func TestOpenQuarantine(t *testing.T) {
 	}
 	if len(s.Items()) != 0 {
 		t.Fatalf("Items=%q", s.Items())
+	}
+	if err := s.Record("x", minuteAt(0), Sample{"cpu/user": 1}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A quarantine that cannot be done skips that file; Open still succeeds.
+func TestOpenQuarantineFailureSkipsFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(ringPath(dir, "x"), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := createRing(osFS, ringPath(dir, "y"), "y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	s, err := open(dir, NewFakeClock(t0), failFS{fsys: osFS, failSuffix: ".bad"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got := s.Items(); !slices.Equal(got, []string{"y"}) {
+		t.Fatalf("Items=%q", got)
 	}
 	if err := s.Record("x", minuteAt(0), Sample{"cpu/user": 1}); err != nil {
 		t.Fatal(err)
