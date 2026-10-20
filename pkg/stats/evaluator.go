@@ -234,6 +234,7 @@ func (e *Evaluator) SetRules(item string, rules []Rule) error {
 		if slices.Equal(merged, DefaultRules()) {
 			st.Rules = nil
 		}
+		e.items[item] = st // reconcile counts with the new rules; put drops it again if idle
 		return e.reconcile(item, st)
 	})
 	return nil

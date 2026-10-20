@@ -486,3 +486,14 @@ func TestRunCapped(t *testing.T) {
 		t.Fatalf("Active after restart = %+v", got)
 	}
 }
+
+// A rule change on an item without stored state counts with the new rules.
+func TestSetRulesCountsWithNewRules(t *testing.T) {
+	r := newRig(t)
+	r.steps(0, 60, 60, 60)
+	r.expect()
+	if err := r.ev.SetRules(item, []stats.Rule{{Key: "cpu_high", Enabled: true, Threshold: 50, Minutes: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	r.expect(firing("cpu_high", 60, 1))
+}
