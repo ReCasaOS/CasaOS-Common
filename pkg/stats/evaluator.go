@@ -63,7 +63,12 @@ const maxRun = 120
 
 // NewEvaluator loads <dir>/alerts.json. A missing file means defaults; an
 // unreadable, invalid or other-version file is moved to alerts.json.bad and
-// defaults are used. emit is called after the state is saved, outside every lock.
+// defaults are used. emit is called after the state is saved, outside every lock,
+// in the order of the state changes. Resolve, SetRules, Rebuild and OnMinute
+// (so Record) can return before their own events are emitted: when another
+// goroutine is emitting the queue, or after a panic in emit until a later
+// call (not Prune) drains the leftovers. There is no flush at shutdown; a
+// caller that needs its events delivered waits for them itself.
 func NewEvaluator(store *Store, dir string, emit func(Event)) (*Evaluator, error) {
 	return newEvaluator(store, dir, emit, osFS)
 }
