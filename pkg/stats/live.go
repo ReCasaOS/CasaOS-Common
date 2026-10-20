@@ -29,7 +29,12 @@ func nanColumn() *[LiveSlots]float64 {
 }
 
 // put stores smp in the slot of at; the last put of a slot replaces it whole.
+// A pre-1970 time (clock glitch) is ignored: its slot would be negative.
+// ponytail: series are never evicted, only reset drops them; bounded by MaxSeries.
 func (l *liveRing) put(at time.Time, smp Sample) {
+	if at.Unix() < 0 {
+		return
+	}
 	slot := at.Unix() / liveStep
 	idx := int(slot % LiveSlots)
 	l.mu.Lock()

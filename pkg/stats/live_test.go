@@ -94,6 +94,26 @@ func TestLiveAbsentKeyOverwritesStale(t *testing.T) {
 	}
 }
 
+func TestLiveSameSlotOmittedKeyIsNoData(t *testing.T) {
+	l := newLiveRing()
+	l.put(liveT0, Sample{"a/b": 1, "c/d": 1})
+	l.put(liveT0.Add(2*time.Second), Sample{"c/d": 2})
+	_, _, s := l.snapshot(liveT0)
+	if !math.IsNaN(s["a/b"][179]) || s["c/d"][179] != 2 {
+		t.Fatalf("a/b=%v c/d=%v", s["a/b"][179], s["c/d"][179])
+	}
+}
+
+func TestLiveBefore1970DoesNotPanic(t *testing.T) {
+	l := newLiveRing()
+	l.put(time.Unix(-7, 0), Sample{"a/b": 1})
+	l.put(liveT0, Sample{"a/b": 2})
+	_, _, s := l.snapshot(liveT0)
+	if s["a/b"][179] != 2 {
+		t.Fatalf("got %v", s["a/b"][179])
+	}
+}
+
 func TestLiveReset(t *testing.T) {
 	l := newLiveRing()
 	l.put(liveT0, Sample{"a/b": 1})
