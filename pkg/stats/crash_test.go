@@ -33,6 +33,11 @@ func crashSeries(m int) int {
 // minute 3 with a third, then forgets the item. *progress is the number of
 // minutes whose commit returned.
 func crashScenario(t *testing.T, fs fsys, dir string, progress *int) {
+	crashScenarioAt(t, fs, dir, 0, progress)
+}
+
+// crashScenarioAt is crashScenario with minute m at minuteAt(start+m).
+func crashScenarioAt(t *testing.T, fs fsys, dir string, start int, progress *int) {
 	s, err := open(dir, NewFakeClock(t0), fs)
 	if err != nil {
 		t.Fatal(err)
@@ -44,15 +49,15 @@ func crashScenario(t *testing.T, fs fsys, dir string, progress *int) {
 			smp[crashKeys[i]] = crashValue(m, i)
 		}
 		for k := 0; k < 12; k++ {
-			if err := s.Record(crashItem, minuteAt(m).Add(time.Duration(k)*5*time.Second), smp); err != nil {
+			if err := s.Record(crashItem, minuteAt(start+m).Add(time.Duration(k)*5*time.Second), smp); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	if err := s.Record(crashItem, minuteAt(4), Sample{}); err != nil {
+	if err := s.Record(crashItem, minuteAt(start+4), Sample{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Forget(crashItem, minuteAt(4)); err != nil {
+	if err := s.Forget(crashItem, minuteAt(start+4)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -61,7 +66,7 @@ func crashScenario(t *testing.T, fs fsys, dir string, progress *int) {
 }
 
 // runFaulted runs the scenario and reports whether a fault killed it.
-func runFaulted(t *testing.T, ff *faultFS, dir string, progress *int) (killed bool) {
+func runFaulted(t *testing.T, ff *faultFS, dir string, start int, progress *int) (killed bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r != errKilled {
@@ -71,16 +76,18 @@ func runFaulted(t *testing.T, ff *faultFS, dir string, progress *int) (killed bo
 		}
 		ff.crash()
 	}()
-	crashScenario(t, ff, dir, progress)
+	crashScenarioAt(t, ff, dir, start, progress)
 	return false
 }
 
 // checkAfterCrash reopens dir on the real filesystem and checks what the
 // scenario left: committed minutes whole, the minute in flight all or
-// nothing, nothing else, no quarantine, and a store that still works.
-func checkAfterCrash(t *testing.T, dir string, progress int) {
+// nothing, nothing else, no quarantine, and a store that still works. With
+// old, the slots held minutes start-Minutes.. (see prefillOld): each of them
+// reads whole or as a gap, never with values of the new minute.
+func checkAfterCrash(t *testing.T, dir string, start int, old bool, progress int) {
 	t.Helper()
-	s, err := Open(dir, NewFakeClock(minuteAt(13)))
+	s, err := Open(dir, NewFakeClock(minuteAt(start+13)))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -107,7 +114,7 @@ func checkAfterCrash(t *testing.T, dir string, progress int) {
 				if p.Avg == nil {
 					continue
 				}
-				m := int((p.T - t0.Unix()) / 60)
+				m := int((p.T-t0.Unix())/60) - start
 				if i < 0 || m < 0 || m > 3 || i >= crashSeries(m) {
 					t.Fatalf("unexpected point %s minute %d", sd.Name, m)
 				}
@@ -130,14 +137,27 @@ func checkAfterCrash(t *testing.T, dir string, progress int) {
 			t.Fatalf("minute %d never committed has data", m)
 		}
 	}
-	feedMinute(t, s, crashItem, minuteAt(10), constSample(Sample{"cpu/user": 7}))
+	if old && slices.Contains(s.Items(), crashItem) {
+		cells := cellsOf(t, s, crashItem, start-Minutes, start-Minutes+3)
+		for i, k := range crashKeys[:2] {
+			for j, c := range cells[k] {
+				if c.OK && (c.Avg != oldValue(j, i) || c.Min != oldValue(j, i) || c.Max != oldValue(j, i)) {
+					t.Fatalf("old minute %d of %s served as %+v", j, k, c)
+				}
+				if c.OK && j < progress {
+					t.Fatalf("old minute %d of %s still served after its slot was reused", j, k)
+				}
+			}
+		}
+	}
+	feedMinute(t, s, crashItem, minuteAt(start+10), constSample(Sample{"cpu/user": 7}))
 	res, err := s.Query(crashItem, Range1h)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, sd := range res.Series {
 		if sd.Name == "user" {
-			if p := sd.Points[len(sd.Points)-3]; p.T != minuteAt(10).Unix() || p.Avg == nil || *p.Avg != 7 {
+			if p := sd.Points[len(sd.Points)-3]; p.T != minuteAt(start+10).Unix() || p.Avg == nil || *p.Avg != 7 {
 				t.Fatalf("new minute not readable: %+v", p)
 			}
 			return
@@ -146,39 +166,103 @@ func checkAfterCrash(t *testing.T, dir string, progress int) {
 	t.Fatal("new minute not readable")
 }
 
-func TestKillAtEveryWriteStep(t *testing.T) {
-	n := 1
-	for ; ; n++ {
-		dir := t.TempDir()
-		ff := &faultFS{fsys: noSync{osFS}, killAt: n}
-		progress := 0
-		if !runFaulted(t, ff, dir, &progress) {
-			checkAfterCrash(t, dir, progress)
-			break
+// oldValue is the value prefillOld writes for series i in old minute j.
+func oldValue(j, i int) float64 { return float64(900 + j*10 + i) }
+
+// reuseStart is a start minute whose scenario minutes wrap the ring: minute 0
+// lands in slot Minutes-2, minute 2 in slot 0.
+func reuseStart() int {
+	return int(((Minutes-2-minuteNo(0))%Minutes + Minutes) % Minutes)
+}
+
+// prefillOld commits minutes start-Minutes..+3 (two series) in dir, so that
+// the scenario starting at start overwrites their slots.
+func prefillOld(t *testing.T, dir string, start int) {
+	t.Helper()
+	s, err := open(dir, NewFakeClock(t0), noSync{osFS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for j := 0; j < 4; j++ {
+		smp := Sample{crashKeys[0]: oldValue(j, 0), crashKeys[1]: oldValue(j, 1)}
+		for k := 0; k < 12; k++ {
+			if err := s.Record(crashItem, minuteAt(start-Minutes+j).Add(time.Duration(k)*5*time.Second), smp); err != nil {
+				t.Fatal(err)
+			}
 		}
-		checkAfterCrash(t, dir, progress)
 	}
-	if n-1 < 40 {
-		t.Fatalf("only %d write steps", n-1)
+	if err := s.Record(crashItem, minuteAt(start-Minutes+4), Sample{}); err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("killed at each of %d write steps", n-1)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// faultLoop runs the scenario once per fault position n = 1.. (fault sets
+// it) until a run completes, checking after each, and returns the number of
+// positions that faulted.
+func faultLoop(t *testing.T, start int, old bool, fault func(ff *faultFS, n int)) int {
+	t.Helper()
+	for n := 1; n <= 1000; n++ {
+		dir := t.TempDir()
+		if old {
+			prefillOld(t, dir, start)
+		}
+		ff := &faultFS{fsys: noSync{osFS}}
+		fault(ff, n)
+		progress := 0
+		killed := runFaulted(t, ff, dir, start, &progress)
+		checkAfterCrash(t, dir, start, old, progress)
+		if !killed {
+			return n - 1
+		}
+	}
+	t.Fatal("still faulting after 1000 positions")
+	return 0
+}
+
+func killAt(ff *faultFS, n int) { ff.killAt = n }
+func tornAt(ff *faultFS, n int) { ff.tornAt = n }
+
+func TestKillAtEveryWriteStep(t *testing.T) {
+	n := faultLoop(t, 0, false, killAt)
+	if n < 40 {
+		t.Fatalf("only %d write steps", n)
+	}
+	t.Logf("killed at each of %d write steps", n)
 }
 
 func TestTornWriteAtEveryWriteStep(t *testing.T) {
-	n := 1
-	for ; ; n++ {
-		dir := t.TempDir()
-		ff := &faultFS{fsys: noSync{osFS}, tornAt: n}
-		progress := 0
-		if !runFaulted(t, ff, dir, &progress) {
-			checkAfterCrash(t, dir, progress)
-			break
-		}
-		checkAfterCrash(t, dir, progress)
-	}
 	// creation image, then a column image and a header per series (3), then Forget's header
-	if n-1 != 8 {
-		t.Fatalf("%d large writes, want 8", n-1)
+	if n := faultLoop(t, 0, false, tornAt); n != 8 {
+		t.Fatalf("%d large writes, want 8", n)
+	}
+}
+
+// The same loops over slots that hold minutes of 7 days ago.
+func TestKillAtEveryWriteStepReusedSlots(t *testing.T) {
+	if slotOf(minuteNo(reuseStart())) != Minutes-2 {
+		t.Fatal("reuseStart")
+	}
+	n := faultLoop(t, reuseStart(), true, killAt)
+	t.Logf("killed at each of %d write steps", n)
+	faultLoop(t, reuseStart(), true, tornAt)
+}
+
+// createRing writes its image to a temp file, syncs it, then renames it.
+func TestCreateRingOrder(t *testing.T) {
+	ff := &faultFS{fsys: noSync{osFS}}
+	p := ringPath(t.TempDir(), "i")
+	r, err := createRing(ff, p, "i")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	tmp := filepath.Base(p) + ".tmp"
+	want := []string{"open " + tmp, "write ", "sync ", "rename " + tmp}
+	if got := opKinds(ff.trace); !slices.Equal(got, want) {
+		t.Fatalf("ops %q, want %q", got, want)
 	}
 }
 
@@ -455,6 +539,13 @@ func TestDiskFullDuringCommit(t *testing.T) {
 		err := s.Record(crashItem, minuteAt(3), Sample{"cpu/user": 4})
 		if !errors.Is(err, syscall.ENOSPC) {
 			t.Fatalf("Record: %v", err)
+		}
+		if len(*calls) != 2 {
+			t.Fatalf("OnMinute calls %v", *calls)
+		}
+		_, _, live := s.items[crashItem].live.snapshot(minuteAt(3))
+		if v := live["cpu/user"][LiveSlots-1]; v != 4 {
+			t.Fatalf("live slot during the failure: %v", v)
 		}
 		if slices.Contains(ring.Keys(), "disk/read") {
 			t.Fatal("series registered by a failed commit")
