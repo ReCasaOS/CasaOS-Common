@@ -11,7 +11,7 @@
 // minute may mix that minute's columns in one point of one response.
 //
 // The directory is 0750 and the files 0640: they name containers, VMs and
-// interfaces.
+// interfaces. The Evaluator emits events in the order of its state changes.
 package stats
 
 import (

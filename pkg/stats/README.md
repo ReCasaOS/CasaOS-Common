@@ -27,7 +27,7 @@ Other behaviour: negative values are stored as given (services clamp what must n
 
 ```go
 st, _ := stats.Open(dir, stats.SystemClock{})
-ev, _ := stats.NewEvaluator(st, dir, emit) // emit(Event) must not block
+ev, _ := stats.NewEvaluator(st, dir, emit) // emit(Event) must not block nor call the Evaluator
 st.SetOnMinute(ev.OnMinute)                // the only wiring; services never call OnMinute
 // at start, per item that has history:   ev.Rebuild(item)
 // every 5 s, per item:                   st.Record(item, now, sample)
@@ -41,6 +41,7 @@ Notes:
 - Use one sampling goroutine per item. `Record` calls for one item from two goroutines are safe for the data, but the `OnMinute` hooks they trigger can run out of order.
 - A `Record` that crosses a minute boundary commits the previous minute at the cost of two fsyncs per item; see [Cost](#cost) before sampling many items from one goroutine.
 - `Prune` drops the rules and state of every item no longer in the store, including an item that has rules but never recorded.
+- Events are emitted in the order of the state changes that made them, outside the Evaluator lock: an `emit` still running delays the emits of later changes (and the call that made them, such as the `Record` whose minute fired), never their state, `Rules`, `Active`, or a `Record` that emits nothing. An `emit` that calls back into a method of the Evaluator that emits would wait for itself.
 - `Evaluator.LastError()` returns the error of the last write of `alerts.json` (nil once a later write succeeds); the service can log or expose it.
 
 ## Extensions
@@ -52,6 +53,8 @@ Added in v0.4.29:
 - `Store.Unreadable(item)` is true exactly when a `Record` of item returns `ErrRingSkipped` (its ring file was left in place at `Open` as unreadable). It is false for a healthy or unknown item and for a corrupt file `Open` could not move aside, which `Record` replaces. A service needs no copy of the ring file naming rule.
 
 - File modes 0750 (directory) and 0640 (files), existing ones narrowed at `Open`: see [Format and limits](#format-and-limits).
+
+- Emit order: events are emitted in the order of the state changes, see the notes of [How to wire](#how-to-wire).
 
 ## Measured cost
 

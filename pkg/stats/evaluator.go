@@ -52,8 +52,9 @@ type Evaluator struct {
 
 	mu      sync.Mutex // guards the fields below
 	items   map[string]*itemState
-	saved   []byte // content of the file on disk
-	saveErr error  // error of the last write, nil once the file matches
+	saved   []byte        // content of the file on disk
+	saveErr error         // error of the last write, nil once the file matches
+	emitted chan struct{} // closed once the emits of the latest state change are done; nil = none
 }
 
 // maxRun caps a run at the longest rule window: a longer run counts the same.
@@ -343,13 +344,28 @@ func (e *Evaluator) fire(item string, st *itemState, key string, sinceMin int64,
 	return Event{item, key, "firing", v, time.Unix(sinceMin*60, 0).UTC()}
 }
 
-// do runs fn under e.mu, then emits its events outside the lock.
+// do runs fn under e.mu, then emits its events outside the lock, after the
+// events of every earlier state change: a slow emit delays the later emits,
+// never a state change or a read.
 func (e *Evaluator) do(fn func() []Event) {
+	var prev, mine chan struct{}
 	evs := func() []Event {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return fn()
+		evs := fn()
+		if len(evs) > 0 {
+			prev, mine = e.emitted, make(chan struct{})
+			e.emitted = mine
+		}
+		return evs
 	}()
+	if mine == nil {
+		return
+	}
+	defer close(mine)
+	if prev != nil {
+		<-prev
+	}
 	for _, ev := range evs {
 		e.emit(ev)
 	}

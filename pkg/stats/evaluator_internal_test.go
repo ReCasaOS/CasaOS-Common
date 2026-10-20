@@ -249,3 +249,71 @@ func TestPruneKeepsStateCreatedDuringIt(t *testing.T) {
 		t.Fatalf("state pruned: %+v", st)
 	}
 }
+
+// Emits come in the order of the state changes, even when the first emit is
+// slow; meanwhile reads and Records that emit nothing go on.
+func TestEmitOrderFollowsStateChanges(t *testing.T) {
+	dir := t.TempDir()
+	s, err := open(dir, NewFakeClock(minuteAt(1)), osFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	feedMinute(t, s, evItem, minuteAt(0), high)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	var log []string
+	ev, err := newEvaluator(s, dir, func(e Event) {
+		if e.State == "firing" {
+			close(entered)
+			<-release
+		}
+		mu.Lock()
+		log = append(log, e.State)
+		mu.Unlock()
+	}, osFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetOnMinute(ev.OnMinute)
+	// The item gets a state first: a rule change then recounts with the new rules.
+	if err := ev.SetRules(evItem, []Rule{{Key: "cpu_high", Enabled: true, Threshold: 99, Minutes: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	aDone := make(chan struct{})
+	go func() { // A: a rule change fires and its emit blocks
+		defer close(aDone)
+		if err := ev.SetRules(evItem, []Rule{{Key: "cpu_high", Enabled: true, Threshold: 50, Minutes: 1}}); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rule change did not fire")
+	}
+	bDone := make(chan struct{})
+	go func() { // B: the item stops being measured
+		defer close(bDone)
+		ev.Resolve(evItem)
+	}()
+	for len(ev.Active(evItem)) != 0 { // B's state change is made without waiting for A
+		runtime.Gosched()
+	}
+	// While A's emit is blocked and B waits for its turn, nothing else is held up.
+	_ = ev.Rules(evItem)
+	_ = ev.Active("other")
+	feedMinute(t, s, "other", minuteAt(0), constSample(Sample{"cpu/user": 1}))
+	select { // a bound for an absence, not for the order
+	case <-bDone:
+		t.Fatal("B emitted before A's emit returned")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-aDone
+	<-bDone
+	if !slices.Equal(log, []string{"firing", "resolved"}) {
+		t.Fatalf("emit order %q", log)
+	}
+}
