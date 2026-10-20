@@ -3,6 +3,7 @@ package stats
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -336,4 +337,53 @@ func TestOldestSlotNotServedTorn(t *testing.T) {
 	w, err := r.readWindow(5, 5)
 	require.NoError(t, err)
 	assert.False(t, w["a/x"][0].OK)
+}
+
+type opLog struct {
+	fsys
+	ops *[]string
+}
+
+func (o opLog) OpenFile(name string, flag int, perm os.FileMode) (file, error) {
+	fl, err := o.fsys.OpenFile(name, flag, perm)
+	return opLogFile{fl, o.ops}, err
+}
+
+type opLogFile struct {
+	file
+	ops *[]string
+}
+
+func (l opLogFile) Sync() error { *l.ops = append(*l.ops, "sync"); return l.file.Sync() }
+func (l opLogFile) WriteAt(b []byte, off int64) (int, error) {
+	switch {
+	case off >= dataStart && off < dataStart+colBytes:
+		*l.ops = append(*l.ops, fmt.Sprintf("stamp=%d", binary.LittleEndian.Uint32(b)))
+	case off >= dataStart+colBytes:
+		*l.ops = append(*l.ops, "value")
+	}
+	return l.file.WriteAt(b, off)
+}
+
+func TestWriteMinuteOrder(t *testing.T) {
+	var ops []string
+	r, err := createRing(opLog{osFS, &ops}, ringPath(t.TempDir(), "i"), "i")
+	require.NoError(t, err)
+	defer r.Close()
+	_, _ = r.addSeries("a/x")
+	ops = nil
+	require.NoError(t, r.writeMinute(7, map[int]minuteValue{0: {1, 1, 1}}))
+	assert.Equal(t, []string{"stamp=0", "sync", "value", "value", "value", "sync", "stamp=7"}, ops)
+}
+
+func TestOpenPicksHigherSeq(t *testing.T) {
+	r, p := newTestRing(t, "i")
+	for _, k := range []string{"a/x", "a/y", "a/z"} {
+		_, _ = r.addSeries(k)
+	}
+	require.NoError(t, r.Close())
+	r2, err := openRing(osFS, p)
+	require.NoError(t, err)
+	defer r2.Close()
+	assert.Len(t, r2.Keys(), 3)
 }

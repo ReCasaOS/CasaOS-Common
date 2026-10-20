@@ -336,6 +336,9 @@ func (r *ring) writeMinute(minute int64, vals map[int]minuteValue) error {
 	if _, err := r.f.WriteAt(b[:], dataStart+slot*4); err != nil {
 		return err
 	}
+	if err := r.f.Sync(); err != nil {
+		return err
+	}
 	for i := range r.hdr.keys {
 		v, ok := vals[i]
 		if !ok {
