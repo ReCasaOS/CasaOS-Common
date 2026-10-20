@@ -71,3 +71,42 @@ func TestFileModes(t *testing.T) {
 	check(alerts, 0o640)
 	check(alerts+".bad", 0o640)
 }
+
+// The Evaluator narrows its own directory when it is not the store's; missing
+// parents are created 0755; a symlinked alerts.json is not followed.
+func TestFileModesEvaluatorDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("modes are not enforced on Windows")
+	}
+	root := t.TempDir()
+	s, err := Open(filepath.Join(root, "new", "rings"), NewFakeClock(t0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if fi, err := os.Stat(filepath.Join(root, "new")); err != nil || fi.Mode().Perm()&0o005 != 0o005 {
+		t.Fatalf("parent: %v %v, want 0755", fi.Mode(), err)
+	}
+	adir := filepath.Join(root, "alerts")
+	if err := os.Mkdir(adir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(adir, 0o777)
+	target := filepath.Join(root, "elsewhere.json")
+	if err := os.WriteFile(target, []byte(`{"version":1,"items":{}}`), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(target, 0o666)
+	if err := os.Symlink(target, filepath.Join(adir, "alerts.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewEvaluator(s, adir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(adir); fi.Mode().Perm() != 0o750 {
+		t.Errorf("alerts directory %o, want 750", fi.Mode().Perm())
+	}
+	if fi, _ := os.Stat(target); fi.Mode().Perm() != 0o666 {
+		t.Errorf("symlink target narrowed to %o", fi.Mode().Perm())
+	}
+}

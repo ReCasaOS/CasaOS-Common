@@ -61,10 +61,9 @@ type agg struct {
 func Open(dir string, clock Clock) (*Store, error) { return open(dir, clock, osFS) }
 
 func open(dir string, clock Clock, fs fsys) (*Store, error) {
-	if err := fs.MkdirAll(dir, dirMode); err != nil {
+	if err := mkdirPrivate(fs, dir); err != nil {
 		return nil, err
 	}
-	fs.Restrict(dir, dirMode) // MkdirAll leaves an existing directory as it was
 	ents, err := fs.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -78,9 +77,7 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 		case strings.HasSuffix(name, ".ring.tmp"):
 			_ = fs.Remove(p) // a leftover of an interrupted create; best effort
 		case strings.HasSuffix(name, ".ring"):
-			if e.Type().IsRegular() {
-				fs.Restrict(p, fileMode)
-			}
+			fs.Restrict(p, fileMode)
 			r, err := openRing(fs, p)
 			if err == nil && filepath.Base(ringPath(dir, r.item)) != name {
 				_ = r.Close()
@@ -166,9 +163,10 @@ func (s *Store) Skipped() []string {
 	return slices.Clone(s.skipped)
 }
 
-// Unreadable reports whether a Record of item returns ErrRingSkipped: its ring
-// file exists but Open could not read it. A corrupt file that Open could not
-// move aside does not count: Record replaces it.
+// Unreadable reports whether the ring file of item was refused at Open: it
+// exists but could not be read, and a Record of item returns ErrRingSkipped
+// (unless ErrClosed or ErrTooManyItems comes first). A corrupt file that Open
+// could not move aside does not count: Record replaces it.
 func (s *Store) Unreadable(item string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

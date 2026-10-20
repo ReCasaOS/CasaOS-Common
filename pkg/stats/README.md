@@ -12,7 +12,7 @@ One fixed-size ring file per item, `<hash of the item>.ring`. A query never wait
 - Worst case for the directory: (256 live + 256 forgotten) x 5.6 MiB = 2.8 GiB. Realistic case: 41 items of 24 series, about 115 MiB.
 - File handles: each ring keeps one open handle for the life of the store (up to 512 with the forgotten items); the service's `LimitNOFILE` (or ulimit) must allow it.
 - Memory: 180 live slots per series, no growth with time.
-- Modes: the directory is created 0750 and every file the package writes (`*.ring`, `alerts.json`, their `.tmp` and `.bad`) 0640, since they hold container, VM and interface names. `Open` narrows an existing directory and existing `*.ring` files to these modes (best effort, an error is ignored); `NewEvaluator` does the same for an existing `alerts.json`. Windows ignores modes.
+- Modes: the directory is created 0750 and every file the package writes (`*.ring`, `alerts.json`, their `.tmp` and `.bad`) 0640, since they hold container, VM and interface names. `Open` narrows an existing directory and existing `*.ring` files to these modes (best effort, an error is ignored); `NewEvaluator` does the same for its directory and an existing `alerts.json`. Missing parent directories are created 0755. A symlink is never followed for this (the directory or a file that is a symlink keeps its target's mode). A `*.ring.bad` or `alerts.json.bad` made before this version keeps its old mode; the 0750 directory covers it. Windows ignores modes.
 - `*.ring.bad` (a quarantined file) is kept once per item; `alerts.json` only holds items that differ from defaults or are active, and is pruned with the store.
 
 ## Series keys and partial errors

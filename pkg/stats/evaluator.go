@@ -69,10 +69,9 @@ func NewEvaluator(store *Store, dir string, emit func(Event)) (*Evaluator, error
 }
 
 func newEvaluator(store *Store, dir string, emit func(Event), fs fsys) (*Evaluator, error) {
-	if err := fs.MkdirAll(dir, dirMode); err != nil {
+	if err := mkdirPrivate(fs, dir); err != nil {
 		return nil, err
 	}
-	fs.Restrict(dir, dirMode)
 	if emit == nil {
 		emit = func(Event) {}
 	}
