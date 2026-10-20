@@ -62,13 +62,17 @@ const maxRun = 120
 // unreadable, invalid or other-version file is moved to alerts.json.bad and
 // defaults are used. emit is called after the state is saved, outside every lock.
 func NewEvaluator(store *Store, dir string, emit func(Event)) (*Evaluator, error) {
-	if err := store.fs.MkdirAll(dir, 0o755); err != nil {
+	return newEvaluator(store, dir, emit, osFS)
+}
+
+func newEvaluator(store *Store, dir string, emit func(Event), fs fsys) (*Evaluator, error) {
+	if err := fs.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
 	if emit == nil {
 		emit = func(Event) {}
 	}
-	e := &Evaluator{store: store, fs: store.fs, path: filepath.Join(dir, "alerts.json"), emit: emit, items: map[string]*itemState{}}
+	e := &Evaluator{store: store, fs: fs, path: filepath.Join(dir, "alerts.json"), emit: emit, items: map[string]*itemState{}}
 	b, err := readFile(e.fs, e.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return e, nil

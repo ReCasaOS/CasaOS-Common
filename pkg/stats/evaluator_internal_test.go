@@ -1,8 +1,10 @@
 package stats
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -51,11 +53,11 @@ func newEvRig(t *testing.T, fs fsys) *evRig {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	r := &evRig{s: s}
-	r.ev, err = NewEvaluator(s, dir, func(e Event) {
+	r.ev, err = newEvaluator(s, dir, func(e Event) {
 		r.mu.Lock()
 		r.events = append(r.events, e)
 		r.mu.Unlock()
-	})
+	}, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,5 +178,37 @@ func TestLastError(t *testing.T) {
 	setRules(t, r.ev, Rule{"cpu_high", true, 50, 10})
 	if err := r.ev.LastError(); err != nil {
 		t.Fatalf("file matches again: %v", err)
+	}
+}
+
+// A rule change whose history read fails keeps the new rules, the active
+// alerts, and saves both.
+func TestSetRulesRingReadError(t *testing.T) {
+	ff := &faultFS{fsys: noSync{osFS}}
+	r := newEvRig(t, ff)
+	setRules(t, r.ev, Rule{"cpu_high", true, 90, 1})
+	feedMinute(t, r.s, evItem, minuteAt(0), high)
+	r.ev.OnMinute(evItem, minuteAt(0))
+	active := r.ev.Active(evItem)
+	if len(active) != 1 {
+		t.Fatalf("Active = %+v", active)
+	}
+	ff.readErr = errTrap
+	setRules(t, r.ev, Rule{"cpu_high", true, 50, 2})
+	ff.readErr = nil
+	want := []Rule{{"cpu_high", true, 50, 2}, {"mem_high", true, 90, 5}}
+	if got := r.ev.Rules(evItem); !slices.Equal(got, want) {
+		t.Fatalf("Rules = %+v", got)
+	}
+	if got := r.ev.Active(evItem); !slices.Equal(got, active) {
+		t.Fatalf("Active = %+v, want %+v", got, active)
+	}
+	b, err := os.ReadFile(filepath.Join(r.s.dir, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sf stateFile
+	if err := json.Unmarshal(b, &sf); err != nil || sf.Items[evItem] == nil || !slices.Equal(sf.Items[evItem].Rules, want) {
+		t.Fatalf("alerts.json: %s (%v)", b, err)
 	}
 }

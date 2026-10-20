@@ -122,6 +122,7 @@ func TestRebuildResolvesAfterDowntime(t *testing.T) {
 		want  []stats.Event
 	}{
 		{"down 5 minutes", 15, []stats.Event{resolved("cpu_high", 0, 0)}},
+		{"down 3 minutes", 13, []stats.Event{resolved("cpu_high", 0, 0)}},
 		{"restart within 2 minutes", 12, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
