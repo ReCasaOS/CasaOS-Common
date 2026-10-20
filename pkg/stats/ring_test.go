@@ -1,0 +1,288 @@
+package stats
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func newTestRing(t *testing.T, item string) (*ring, string) {
+	t.Helper()
+	p := ringPath(t.TempDir(), item)
+	r, err := createRing(osFS, p, item)
+	require.NoError(t, err)
+	t.Cleanup(func() { r.Close() })
+	return r, p
+}
+
+func fileSize(t *testing.T, p string) int64 {
+	t.Helper()
+	st, err := os.Stat(p)
+	require.NoError(t, err)
+	return st.Size()
+}
+
+func TestRingPathSafe(t *testing.T) {
+	dir := t.TempDir()
+	re := regexp.MustCompile(`^[0-9a-f]{32}\.ring$`)
+	seen := map[string]bool{}
+	for _, it := range []string{"../x", "a/b", "app:x:y:1", "Ünï", "A", "a"} {
+		p := ringPath(dir, it)
+		assert.Equal(t, dir, filepath.Dir(p))
+		assert.Regexp(t, re, filepath.Base(p))
+		assert.False(t, seen[p], it)
+		seen[p] = true
+	}
+}
+
+func TestCreateOpenRoundTrip(t *testing.T) {
+	r, p := newTestRing(t, "app:x")
+	require.NoError(t, r.Close())
+	r2, err := openRing(osFS, p)
+	require.NoError(t, err)
+	defer r2.Close()
+	assert.Equal(t, "app:x", r2.Item())
+	assert.Empty(t, r2.Keys())
+	assert.Equal(t, ringFileSize(0), fileSize(t, p))
+	_, err = os.Stat(p + ".tmp")
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestAddSeriesAndSize(t *testing.T) {
+	r, p := newTestRing(t, "i")
+	i0, err := r.addSeries("cpu/user")
+	require.NoError(t, err)
+	i1, err := r.addSeries("memory/rss")
+	require.NoError(t, err)
+	assert.Equal(t, []int{0, 1}, []int{i0, i1})
+	assert.Equal(t, ringFileSize(2), fileSize(t, p))
+	again, err := r.addSeries("cpu/user")
+	require.NoError(t, err)
+	assert.Equal(t, 0, again)
+	assert.Equal(t, ringFileSize(2), fileSize(t, p))
+	require.NoError(t, r.Close())
+	r2, err := openRing(osFS, p)
+	require.NoError(t, err)
+	defer r2.Close()
+	assert.Equal(t, []string{"cpu/user", "memory/rss"}, r2.Keys())
+}
+
+func TestAddSeriesLimits(t *testing.T) {
+	r, _ := newTestRing(t, "i")
+	_, err := r.addSeries("")
+	assert.ErrorIs(t, err, ErrBadKey)
+	_, err = r.addSeries(strings.Repeat("k", 64))
+	assert.ErrorIs(t, err, ErrBadKey)
+	_, err = r.addSeries(strings.Repeat("k", 63))
+	require.NoError(t, err)
+	for i := 1; i < MaxSeries; i++ {
+		_, err = r.addSeries("c/" + string(rune('a'+i%26)) + string(rune('a'+i/26)))
+		require.NoError(t, err)
+	}
+	_, err = r.addSeries("c/over")
+	assert.ErrorIs(t, err, ErrSeriesCap)
+}
+
+func TestWriteReadMinute(t *testing.T) {
+	r, _ := newTestRing(t, "i")
+	_, _ = r.addSeries("cpu/user")
+	_, _ = r.addSeries("cpu/system")
+	require.NoError(t, r.writeMinute(100, map[int]minuteValue{0: {1.5, 1, 2}}))
+	w, err := r.readWindow(99, 101)
+	require.NoError(t, err)
+	c := w["cpu/user"]
+	require.Len(t, c, 3)
+	assert.False(t, c[0].OK)
+	assert.Equal(t, minuteCell{1.5, 1, 2, true}, c[1])
+	assert.False(t, c[2].OK)
+	assert.False(t, w["cpu/system"][1].OK)
+}
+
+func TestLaterSeriesIsGapForEarlierMinutes(t *testing.T) {
+	r, _ := newTestRing(t, "i")
+	_, _ = r.addSeries("a/x")
+	require.NoError(t, r.writeMinute(100, map[int]minuteValue{0: {1, 1, 1}}))
+	_, _ = r.addSeries("a/y")
+	require.NoError(t, r.writeMinute(101, map[int]minuteValue{0: {1, 1, 1}, 1: {2, 2, 2}}))
+	w, err := r.readWindow(100, 101)
+	require.NoError(t, err)
+	assert.False(t, w["a/y"][0].OK)
+	assert.True(t, w["a/y"][1].OK)
+	assert.True(t, w["a/x"][0].OK)
+}
+
+func TestFloat32Precision(t *testing.T) {
+	r, _ := newTestRing(t, "i")
+	_, _ = r.addSeries("a/x")
+	_, _ = r.addSeries("a/y")
+	require.NoError(t, r.writeMinute(5, map[int]minuteValue{
+		0: {17179869184, 17179869184, 17179869184}, 1: {1.5e10, 1.5e10, 1.5e10}}))
+	w, err := r.readWindow(5, 5)
+	require.NoError(t, err)
+	assert.InEpsilon(t, 17179869184.0, w["a/x"][0].Avg, 1e-6)
+	assert.InEpsilon(t, 1.5e10, w["a/y"][0].Max, 1e-6)
+}
+
+func TestWrapAndOverwrite(t *testing.T) {
+	p := ringPath(t.TempDir(), "i")
+	r, err := createRing(noSync{osFS}, p, "i")
+	require.NoError(t, err)
+	defer r.Close()
+	_, _ = r.addSeries("a/x")
+	for m := int64(1); m <= Minutes+5; m++ {
+		require.NoError(t, r.writeMinute(m, map[int]minuteValue{0: {float64(m), float64(m), float64(m)}}))
+	}
+	w, err := r.readWindow(6, Minutes+5)
+	require.NoError(t, err)
+	require.Len(t, w["a/x"], Minutes)
+	for i, c := range w["a/x"] {
+		require.True(t, c.OK, i)
+		require.Equal(t, float64(6+i), c.Avg)
+	}
+	w, err = r.readWindow(1, 5)
+	require.NoError(t, err)
+	for _, c := range w["a/x"] {
+		assert.False(t, c.OK)
+	}
+	n, err := r.newestMinute()
+	require.NoError(t, err)
+	assert.EqualValues(t, Minutes+5, n)
+}
+
+func TestNewestMinuteEmpty(t *testing.T) {
+	r, _ := newTestRing(t, "i")
+	n, err := r.newestMinute()
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, n)
+}
+
+func readHeaders(t *testing.T, p string) (a, b header, aok, bok bool) {
+	t.Helper()
+	raw, err := os.ReadFile(p)
+	require.NoError(t, err)
+	a, aerr := decodeHeader(raw[:headerSize])
+	b, berr := decodeHeader(raw[headerSize : 2*headerSize])
+	return a, b, aerr == nil, berr == nil
+}
+
+func patch(t *testing.T, p string, off int64, b []byte) {
+	t.Helper()
+	fl, err := os.OpenFile(p, os.O_RDWR, 0)
+	require.NoError(t, err)
+	_, err = fl.WriteAt(b, off)
+	require.NoError(t, err)
+	require.NoError(t, fl.Close())
+}
+
+func TestHeaderAlternates(t *testing.T) {
+	r, p := newTestRing(t, "i")
+	for _, k := range []string{"a/x", "a/y", "a/z"} {
+		_, err := r.addSeries(k)
+		require.NoError(t, err)
+	}
+	require.NoError(t, r.Close())
+	a, b, aok, bok := readHeaders(t, p)
+	require.True(t, aok && bok)
+	d := int64(a.seq) - int64(b.seq)
+	assert.True(t, d == 1 || d == -1, d)
+	// corrupt copy A (flip a byte inside its CRC-covered area)
+	patch(t, p, 40, []byte{0xFF})
+	r2, err := openRing(osFS, p)
+	require.NoError(t, err)
+	defer r2.Close()
+	assert.Equal(t, []string{"a/x", "a/y", "a/z"}, r2.Keys())
+}
+
+// withHeader rewrites both copies from the current one, mutated, with valid CRCs.
+func withHeader(t *testing.T, p string, mut func(h *header)) {
+	t.Helper()
+	a, b, _, _ := readHeaders(t, p)
+	if b.seq > a.seq {
+		a = b
+	}
+	mut(&a)
+	patch(t, p, 0, encodeHeader(a))
+	a.seq--
+	patch(t, p, headerSize, encodeHeader(a))
+}
+
+func TestOpenRejects(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(t *testing.T, p string)
+		want error
+	}{
+		{"empty", func(t *testing.T, p string) { require.NoError(t, os.WriteFile(p, nil, 0o644)) }, errCorrupt},
+		{"short", func(t *testing.T, p string) { require.NoError(t, os.WriteFile(p, make([]byte, 5000), 0o644)) }, errCorrupt},
+		{"magic", func(t *testing.T, p string) {
+			patch(t, p, 0, []byte("XXXXXXXX"))
+			patch(t, p, headerSize, []byte("XXXXXXXX"))
+		}, errCorrupt},
+		{"both headers corrupt", func(t *testing.T, p string) {
+			patch(t, p, 40, []byte{0xFF})
+			patch(t, p, headerSize+40, []byte{0xFF})
+		}, errCorrupt},
+		{"version 2", func(t *testing.T, p string) { withHeader(t, p, func(h *header) { h.version = 2 }) }, errVersion},
+		{"minutes", func(t *testing.T, p string) { withHeader(t, p, func(h *header) { h.minutes = 5 }) }, errCorrupt},
+		{"nseries 49", func(t *testing.T, p string) {
+			withHeader(t, p, func(h *header) { h.keys = make([]string, 49) })
+		}, errCorrupt},
+		{"truncated", func(t *testing.T, p string) {
+			withHeader(t, p, func(h *header) { h.keys = []string{"a/x"} })
+		}, errCorrupt},
+		{"name length", func(t *testing.T, p string) {
+			withHeader(t, p, func(h *header) { h.nameLen = 257 })
+		}, errCorrupt},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, p := newTestRing(t, "i")
+			require.NoError(t, r.Close())
+			c.mut(t, p)
+			_, err := openRing(osFS, p)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, c.want), err.Error())
+		})
+	}
+	t.Run("trailing bytes", func(t *testing.T) {
+		r, p := newTestRing(t, "i")
+		require.NoError(t, r.Close())
+		patch(t, p, ringFileSize(0), []byte("tail"))
+		r2, err := openRing(osFS, p)
+		require.NoError(t, err)
+		r2.Close()
+	})
+}
+
+func TestForgotten(t *testing.T) {
+	r, p := newTestRing(t, "i")
+	require.NoError(t, r.setForgotten(123))
+	assert.EqualValues(t, 123, r.ForgottenAt())
+	require.NoError(t, r.Close())
+	r2, err := openRing(osFS, p)
+	require.NoError(t, err)
+	assert.EqualValues(t, 123, r2.ForgottenAt())
+	require.NoError(t, r2.setForgotten(0))
+	require.NoError(t, r2.Close())
+	r3, err := openRing(osFS, p)
+	require.NoError(t, err)
+	defer r3.Close()
+	assert.EqualValues(t, 0, r3.ForgottenAt())
+}
+
+func TestRejectedNames(t *testing.T) {
+	d := t.TempDir()
+	for _, n := range []string{"", strings.Repeat("n", 257)} {
+		_, err := createRing(osFS, ringPath(d, "x"), n)
+		assert.ErrorIs(t, err, ErrBadItem)
+	}
+	r, err := createRing(osFS, ringPath(d, "x"), strings.Repeat("n", 256))
+	require.NoError(t, err)
+	r.Close()
+}

@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -23,3 +24,19 @@ func feedMinute(t *testing.T, s *Store, item string, minute time.Time, perSample
 }
 
 func f(v float64) *float64 { return &v }
+
+// noSync wraps a filesystem so that file Sync is a no-op; it keeps tests that
+// write thousands of minutes fast.
+type noSync struct{ fsys }
+
+func (n noSync) OpenFile(name string, flag int, perm os.FileMode) (file, error) {
+	fl, err := n.fsys.OpenFile(name, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return noSyncFile{fl}, nil
+}
+
+type noSyncFile struct{ file }
+
+func (noSyncFile) Sync() error { return nil }
