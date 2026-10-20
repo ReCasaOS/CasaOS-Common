@@ -26,6 +26,7 @@ func at(i int) time.Time { return base.Add(time.Duration(i) * time.Minute) }
 type rig struct {
 	t      *testing.T
 	dir    string
+	clock  *stats.FakeClock
 	store  *stats.Store
 	ev     *stats.Evaluator
 	mu     sync.Mutex
@@ -34,8 +35,8 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	r := &rig{t: t, dir: t.TempDir()}
-	s, err := stats.Open(r.dir, stats.NewFakeClock(base))
+	r := &rig{t: t, dir: t.TempDir(), clock: stats.NewFakeClock(base)}
+	s, err := stats.Open(r.dir, r.clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +332,9 @@ func TestCorruptStateFile(t *testing.T) {
 		"active key":    `{"version":1,"items":{"x":{"active":[{"key":"disk_high","since":0,"value":1}]}}}`,
 		"runs key":      `{"version":1,"items":{"x":{"runs":{"disk_high":3}}}}`,
 		"null item":     `{"version":1,"items":{"x":null}}`,
+		"dup active":    `{"version":1,"items":{"x":{"active":[{"key":"cpu_high","since":0,"value":1},{"key":"cpu_high","since":60,"value":2}]}}}`,
+		"runs negative": `{"version":1,"items":{"x":{"runs":{"cpu_high":-1}}}}`,
+		"runs huge":     `{"version":1,"items":{"x":{"runs":{"cpu_high":121}}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
@@ -445,5 +449,35 @@ func TestStateFileAtomic(t *testing.T) {
 	// Back to idle: the item is no longer stored.
 	if items := r.state()["items"].(map[string]any); len(items) != 0 {
 		t.Fatalf("idle item still stored: %v", items)
+	}
+}
+
+// An item whose stored state is empty, "rules":[] included, is not kept.
+func TestIdleItemNotKept(t *testing.T) {
+	r := newRig(t)
+	r.writeState(`{"version":1,"items":{"` + item + `":{"rules":[]},"y":{"rules":[],"active":[],"runs":{}}}}`)
+	r.open()
+	r.step(0, 10)
+	if _, err := os.Stat(filepath.Join(r.dir, "alerts.json.bad")); !os.IsNotExist(err) {
+		t.Fatalf("sanitised file quarantined: %v", err)
+	}
+	if items := r.state()["items"].(map[string]any); len(items) != 0 {
+		t.Fatalf("idle items kept: %v", items)
+	}
+}
+
+// A run is capped at the longest rule window, so a long episode stays loadable.
+func TestRunCapped(t *testing.T) {
+	r := newRig(t)
+	r.writeState(cpuOnly)
+	r.open()
+	r.steps(0, repeat(95, 125)...)
+	r.expect(firing("cpu_high", 95, 0))
+	if runs := r.state()["items"].(map[string]any)[item].(map[string]any)["runs"].(map[string]any); runs["cpu_high"] != 120.0 {
+		t.Fatalf("runs = %v, want 120", runs)
+	}
+	r.open()
+	if got := r.ev.Active(item); len(got) != 1 {
+		t.Fatalf("Active after restart = %+v", got)
 	}
 }

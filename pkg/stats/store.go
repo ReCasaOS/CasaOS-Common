@@ -166,6 +166,22 @@ func (s *Store) minuteValue(item, key string, minute int64) (avg float64, ok boo
 	return 0, false, nil
 }
 
+// recentMinutes returns the newest committed minute of item (0: none) and
+// the cells of the n minutes ending there.
+func (s *Store) recentMinutes(item string, n int64) (newest int64, cells map[string][]minuteCell, err error) {
+	s.mu.RLock()
+	e := s.items[item]
+	s.mu.RUnlock()
+	if e == nil {
+		return 0, nil, nil
+	}
+	if newest, err = e.ring.newestMinute(); err != nil || newest < n {
+		return 0, nil, err
+	}
+	cells, err = e.ring.readWindow(newest-n+1, newest)
+	return newest, cells, err
+}
+
 // entry returns the live entry of name, creating or reviving it.
 // ponytail: create and revive do their I/O under the store lock; it happens
 // once per item lifetime, a finer lock is not worth it.
