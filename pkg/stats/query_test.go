@@ -411,3 +411,61 @@ func TestQueryNeverSeesTornSlot(t *testing.T) {
 	}
 	t.Logf("%d queries during the writes", queries)
 }
+
+func TestSeriesWithoutDataInWindowOmitted(t *testing.T) {
+	s, _ := openTest(t)
+	feedEach(t, s, "x", 0, 101, func(i int) Sample {
+		smp := idx(i)
+		if i <= 2 {
+			smp["memory/x"] = 1
+		}
+		return smp
+	})
+	setNow(s, minuteAt(101))
+	for _, r := range []Range{RangeLive, Range15m} {
+		res := query(t, s, "x", r)
+		if len(res.Series) != 1 || res.Series[0].Chart+"/"+res.Series[0].Name != "cpu/user" {
+			t.Fatalf("%s: %+v", r, res.Series)
+		}
+	}
+}
+
+// TestStaleSlotNotServedAsNewMinute parks a query between its two reads of the
+// stamps while the writer commits a minute over a slot that still held the
+// same slot's minute from a week earlier: the old stamp read first must make
+// that point a gap, even though the stamp matches when read again.
+func TestStaleSlotNotServedAsNewMinute(t *testing.T) {
+	bfs := blockingFS{fsys: noSync{osFS}, armed: new(atomic.Bool), stampReads: new(atomic.Int32),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := open(t.TempDir(), NewFakeClock(t0), bfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	feedEach(t, s, "x", 20, Minutes+20, idx) // 20..10099 committed: slot of 10100 holds minute 20
+	setNow(s, minuteAt(Minutes+21))          // 15m window 10086..10100, no wrap: one stamp read each side
+
+	var released sync.Once
+	release := func() { released.Do(func() { close(bfs.release) }) }
+	defer release()
+	bfs.stampReads.Store(2) // park the second stamp read
+	done := make(chan Result, 1)
+	go func() {
+		res, _ := s.Query("x", Range15m)
+		done <- res
+	}()
+	select {
+	case <-bfs.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("query never reached its second stamp read")
+	}
+	if err := s.Record("x", minuteAt(Minutes+21), idx(Minutes+21)); err != nil { // commits 10100
+		t.Fatal(err)
+	}
+	release()
+	pts := seriesOf(t, <-done, "cpu/user")
+	wantPoint(t, pointAt(t, pts, Minutes+19), Minutes+19, Minutes+19, Minutes+19)
+	if p := pointAt(t, pts, Minutes+20); !isGap(p) {
+		t.Fatalf("week-old values served as minute %d: %v %v %v", Minutes+20, *p.Avg, *p.Min, *p.Max)
+	}
+}

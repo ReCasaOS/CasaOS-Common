@@ -373,6 +373,12 @@ func readFull(f file, b []byte, off int64) error {
 // readWindow returns toMin-fromMin+1 cells per series. A cell is OK only when
 // the slot stamp matched the expected minute before and after its values were
 // read and the average is not NaN.
+//
+// Known limit: if the clock steps back more than a minute, the same minute
+// number can be committed twice. A query overlapping that second write sees
+// the same stamp before and after and may build one point of that response
+// from columns of both writes (avg of one, min of the other). Nothing wrong is
+// persisted; the next query reads the second write whole.
 func (r *ring) readWindow(fromMin, toMin int64) (map[string][]minuteCell, error) {
 	n := toMin - fromMin + 1
 	if n < 1 || n > Minutes {

@@ -42,13 +42,15 @@ type noSyncFile struct{ file }
 
 func (noSyncFile) Sync() error { return nil }
 
-// blockingFS parks the first file write made while armed: it closes entered,
-// then waits for release to be closed before writing.
+// blockingFS parks the first file write made while armed, or the stamp-column
+// read that brings stampReads to 0: it closes entered,
+// then waits for release to be closed before doing the I/O.
 type blockingFS struct {
 	fsys
-	armed   *atomic.Bool
-	entered chan struct{}
-	release chan struct{}
+	armed      *atomic.Bool
+	stampReads *atomic.Int32 // if set, the ReadAt of the stamp column that brings it to 0 parks
+	entered    chan struct{}
+	release    chan struct{}
 }
 
 func (b blockingFS) OpenFile(name string, flag int, perm os.FileMode) (file, error) {
@@ -70,4 +72,12 @@ func (f blockingFile) WriteAt(p []byte, off int64) (int, error) {
 		<-f.b.release
 	}
 	return f.file.WriteAt(p, off)
+}
+
+func (f blockingFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.b.stampReads != nil && off >= dataStart && off < dataStart+colBytes && f.b.stampReads.Add(-1) == 0 {
+		close(f.b.entered)
+		<-f.b.release
+	}
+	return f.file.ReadAt(p, off)
 }

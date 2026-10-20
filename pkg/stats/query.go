@@ -47,7 +47,8 @@ func (s *Store) Query(item string, r Range) (Result, error) {
 			for i, v := range vals {
 				pts[i].T = from + int64(i)*step
 				if !math.IsNaN(v) {
-					pts[i].Avg, pts[i].Min, pts[i].Max = &v, &v, &v
+					a, lo, hi := v, v, v
+					pts[i].Avg, pts[i].Min, pts[i].Max = &a, &lo, &hi
 				}
 			}
 			points[k] = pts
