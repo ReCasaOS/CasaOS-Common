@@ -83,7 +83,7 @@ type header struct {
 	version, minutes uint32
 	forgotten        int64
 	name             string
-	nameLen          int // raw length field; 0 means len(name) when encoding
+	nameLen          int // test hook: raw length field; 0 means len(name) when encoding
 	keys             []string
 	seq              uint64
 }
@@ -201,6 +201,8 @@ func (r *ring) writeHeader(h header) error {
 	return nil
 }
 
+// createRing replaces any file at path: the Store only calls it for an item
+// that has no ring yet, and holds the item lock while it does.
 func createRing(fs fsys, path, item string) (*ring, error) {
 	if len(item) < 1 || len(item) > MaxItemLen {
 		return nil, ErrBadItem
@@ -329,6 +331,11 @@ func (r *ring) writeMinute(minute int64, vals map[int]minuteValue) error {
 	defer r.mu.Unlock()
 	slot := slotOf(minute)
 	var b [4]byte
+	// Invalidate the slot first: a reader of the oldest minute of a full window
+	// must not match the old stamp against half-written new values.
+	if _, err := r.f.WriteAt(b[:], dataStart+slot*4); err != nil {
+		return err
+	}
 	for i := range r.hdr.keys {
 		v, ok := vals[i]
 		if !ok {
@@ -409,11 +416,11 @@ func (r *ring) readWindow(fromMin, toMin int64) (map[string][]minuteCell, error)
 			if binary.LittleEndian.Uint32(before[j*4:]) != want || binary.LittleEndian.Uint32(after[j*4:]) != want {
 				continue
 			}
-			a := getF32(cols[i][0][j*4:])
-			if math.IsNaN(a) {
+			a, lo, hi := getF32(cols[i][0][j*4:]), getF32(cols[i][1][j*4:]), getF32(cols[i][2][j*4:])
+			if math.IsNaN(a) || math.IsNaN(lo) || math.IsNaN(hi) {
 				continue
 			}
-			cells[j] = minuteCell{a, getF32(cols[i][1][j*4:]), getF32(cols[i][2][j*4:]), true}
+			cells[j] = minuteCell{a, lo, hi, true}
 		}
 		res[k] = cells
 	}

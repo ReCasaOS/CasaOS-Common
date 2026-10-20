@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -125,8 +126,13 @@ func TestFloat32Precision(t *testing.T) {
 		0: {17179869184, 17179869184, 17179869184}, 1: {1.5e10, 1.5e10, 1.5e10}}))
 	w, err := r.readWindow(5, 5)
 	require.NoError(t, err)
-	assert.InEpsilon(t, 17179869184.0, w["a/x"][0].Avg, 1e-6)
-	assert.InEpsilon(t, 1.5e10, w["a/y"][0].Max, 1e-6)
+	for k, v := range map[string]float64{"a/x": 17179869184, "a/y": 1.5e10} {
+		c := w[k][0]
+		assert.True(t, c.OK)
+		assert.InEpsilon(t, v, c.Avg, 1e-6)
+		assert.InEpsilon(t, v, c.Min, 1e-6)
+		assert.InEpsilon(t, v, c.Max, 1e-6)
+	}
 }
 
 func TestWrapAndOverwrite(t *testing.T) {
@@ -136,7 +142,7 @@ func TestWrapAndOverwrite(t *testing.T) {
 	defer r.Close()
 	_, _ = r.addSeries("a/x")
 	for m := int64(1); m <= Minutes+5; m++ {
-		require.NoError(t, r.writeMinute(m, map[int]minuteValue{0: {float64(m), float64(m), float64(m)}}))
+		require.NoError(t, r.writeMinute(m, map[int]minuteValue{0: {float64(m), float64(m) - 1, float64(m) + 1}}))
 	}
 	w, err := r.readWindow(6, Minutes+5)
 	require.NoError(t, err)
@@ -144,6 +150,8 @@ func TestWrapAndOverwrite(t *testing.T) {
 	for i, c := range w["a/x"] {
 		require.True(t, c.OK, i)
 		require.Equal(t, float64(6+i), c.Avg)
+		require.Equal(t, float64(5+i), c.Min)
+		require.Equal(t, float64(7+i), c.Max)
 	}
 	w, err = r.readWindow(1, 5)
 	require.NoError(t, err)
@@ -191,12 +199,16 @@ func TestHeaderAlternates(t *testing.T) {
 	require.True(t, aok && bok)
 	d := int64(a.seq) - int64(b.seq)
 	assert.True(t, d == 1 || d == -1, d)
-	// corrupt copy A (flip a byte inside its CRC-covered area)
-	patch(t, p, 40, []byte{0xFF})
+	// corrupt the copy with the higher seq: the older one (two keys) must win
+	hi := 0
+	if b.seq > a.seq {
+		hi = 1
+	}
+	patch(t, p, int64(hi)*headerSize+40, []byte{0xFF})
 	r2, err := openRing(osFS, p)
 	require.NoError(t, err)
 	defer r2.Close()
-	assert.Equal(t, []string{"a/x", "a/y", "a/z"}, r2.Keys())
+	assert.Equal(t, []string{"a/x", "a/y"}, r2.Keys())
 }
 
 // withHeader rewrites both copies from the current one, mutated, with valid CRCs.
@@ -285,4 +297,43 @@ func TestRejectedNames(t *testing.T) {
 	r, err := createRing(osFS, ringPath(d, "x"), strings.Repeat("n", 256))
 	require.NoError(t, err)
 	r.Close()
+}
+
+// stopBeforeStamp makes the real stamp write fail, as a crash between the
+// values and the stamp would.
+type stopBeforeStamp struct {
+	fsys
+	armed *bool
+}
+
+func (s stopBeforeStamp) OpenFile(name string, flag int, perm os.FileMode) (file, error) {
+	fl, err := s.fsys.OpenFile(name, flag, perm)
+	return stampFailFile{fl, s.armed}, err
+}
+
+type stampFailFile struct {
+	file
+	armed *bool
+}
+
+func (s stampFailFile) WriteAt(b []byte, off int64) (int, error) {
+	if *s.armed && off >= dataStart && off < dataStart+colBytes && binary.LittleEndian.Uint32(b) != 0 {
+		return 0, errors.New("crash before stamp")
+	}
+	return s.file.WriteAt(b, off)
+}
+
+func TestOldestSlotNotServedTorn(t *testing.T) {
+	armed := false
+	p := ringPath(t.TempDir(), "i")
+	r, err := createRing(noSync{stopBeforeStamp{osFS, &armed}}, p, "i")
+	require.NoError(t, err)
+	defer r.Close()
+	_, _ = r.addSeries("a/x")
+	require.NoError(t, r.writeMinute(5, map[int]minuteValue{0: {1, 1, 1}}))
+	armed = true
+	require.Error(t, r.writeMinute(5+Minutes, map[int]minuteValue{0: {9, 9, 9}}))
+	w, err := r.readWindow(5, 5)
+	require.NoError(t, err)
+	assert.False(t, w["a/x"][0].OK)
 }
