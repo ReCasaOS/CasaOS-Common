@@ -1,11 +1,13 @@
 package stats
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -205,5 +207,46 @@ func TestQueryAfterClose(t *testing.T) {
 	_ = s.Close()
 	if _, err := s.Query("x", RangeLive); !errors.Is(err, ErrClosed) {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// An unreadable ring is never replaced: its history survives a temporary error.
+func TestRecordRefusesSkippedRing(t *testing.T) {
+	dir := t.TempDir()
+	smp := constSample(Sample{"cpu/user": 3})
+	s, err := Open(dir, NewFakeClock(minuteAt(5)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedMinute(t, s, "x", minuteAt(0), smp)
+	_ = s.Close()
+	xf := ringPath(dir, "x")
+	before, err := os.ReadFile(xf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err = open(dir, NewFakeClock(minuteAt(5)), denyOpenFS{osFS, filepath.Base(xf)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.Record("x", minuteAt(1), Sample{"cpu/user": 9})
+	if !errors.Is(err, ErrRingSkipped) || !strings.Contains(err.Error(), filepath.Base(xf)) || IsPartial(err) {
+		t.Fatalf("err %v", err)
+	}
+	if err := s.Record("y", minuteAt(1), Sample{"cpu/user": 9}); err != nil {
+		t.Fatalf("other item: %v", err)
+	}
+	_ = s.Close()
+	if after, _ := os.ReadFile(xf); !bytes.Equal(before, after) {
+		t.Fatal("skipped ring file was modified")
+	}
+	s, err = Open(dir, NewFakeClock(minuteAt(5)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	res, err := s.Query("x", Range15m)
+	if err != nil || len(res.Series) != 1 {
+		t.Fatalf("history lost: %v %+v", err, res)
 	}
 }

@@ -40,6 +40,7 @@ var (
 	ErrTooManyItems = errors.New("stats: too many items")
 	ErrOutOfOrder   = errors.New("stats: sample out of order")
 	ErrClosed       = errors.New("stats: store closed")
+	ErrRingSkipped  = errors.New("stats: ring file unreadable at Open, left untouched") // the error text names the file
 )
 
 // Range is a period asked by the page.

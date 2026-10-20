@@ -34,6 +34,7 @@ type Store struct {
 	items       map[string]*entry
 	quarantined []string
 	skipped     []string
+	refused     map[string]bool // unreadable (not corrupt) ring files: never overwritten
 	onMinute    func(item string, minute time.Time)
 	closed      bool
 }
@@ -92,8 +93,13 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 				s.quarantined = append(s.quarantined, name)
 			case err != nil:
 				// Unreadable (read-only, dangling or directory symlink, I/O error):
-				// one bad file must not take every other item down.
+				// one bad file must not take every other item down. The file may
+				// hold good history behind a temporary error, so it is never replaced.
 				s.skipped = append(s.skipped, name)
+				if s.refused == nil {
+					s.refused = map[string]bool{}
+				}
+				s.refused[name] = true
 			default:
 				s.items[r.item] = &entry{ring: r, live: newLiveRing()}
 			}
@@ -145,9 +151,11 @@ func (s *Store) Quarantined() []string {
 	return slices.Clone(s.quarantined)
 }
 
-// Skipped returns the ring files Open could not read for a reason other than
-// corruption (permissions, a dangling symlink, an I/O error) and left in
-// place; their items are absent from the store.
+// Skipped returns the ring files Open did not load: those it could not read
+// for a reason other than corruption (permissions, a dangling symlink, an I/O
+// error), which stay untouched (Record of their item returns ErrRingSkipped
+// until a later Open reads them), and corrupt ones it could not move to *.bad,
+// which a Record of their item replaces. Their items are absent from the store.
 func (s *Store) Skipped() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,6 +228,9 @@ func (s *Store) entry(name string) (*entry, error) {
 	}
 	if e != nil {
 		return e, e.ring.setForgotten(0)
+	}
+	if base := filepath.Base(ringPath(s.dir, name)); s.refused[base] {
+		return nil, fmt.Errorf("%w: %s", ErrRingSkipped, base)
 	}
 	r, err := createRing(s.fs, ringPath(s.dir, name), name)
 	if err != nil {

@@ -510,6 +510,9 @@ func TestOpenQuarantineFailureSkipsFile(t *testing.T) {
 	if got := s.Items(); !slices.Equal(got, []string{"y"}) {
 		t.Fatalf("Items=%q", got)
 	}
+	if got := s.Skipped(); !slices.Equal(got, []string{filepath.Base(ringPath(dir, "x"))}) {
+		t.Fatalf("Skipped=%q", got)
+	}
 	if err := s.Record("x", minuteAt(0), Sample{"cpu/user": 1}); err != nil {
 		t.Fatal(err)
 	}
