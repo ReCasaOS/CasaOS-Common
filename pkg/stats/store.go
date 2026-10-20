@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -11,8 +12,18 @@ import (
 	"time"
 )
 
+// retention is how long a forgotten or silent item, and a *.ring.bad, are kept.
+const retention = 7 * 24 * time.Hour
+
+var errGone = errors.New("stats: item removed")
+
 // Store keeps, per item, the last 15 minutes in memory (5 s) and 7 days of
 // minutes on disk (one ring file per item).
+//
+// Lock order: Store.mu, then entry.mu, then ring.mu. Query holds Store.mu
+// (read) only for the lookup, then ring.cmu (read) while it reads the file;
+// ring.Close takes ring.cmu, so a ring is closed, and only then removed, once
+// no query reads it.
 type Store struct {
 	dir   string
 	clock Clock
@@ -31,6 +42,7 @@ type entry struct {
 
 	mu      sync.Mutex // per-item writer lock, held during I/O
 	closed  bool
+	gone    bool      // removed by Sweep or Forget; a Record looks the item up again
 	last    time.Time // last accepted sample
 	hasLast bool
 	accMin  int64           // minute of acc
@@ -177,13 +189,21 @@ func (s *Store) Record(item string, at time.Time, smp Sample) error {
 	if at.Unix() < 0 {
 		return nil // a pre-1970 clock has nothing worth storing
 	}
-	e, err := s.entry(item)
-	if err != nil {
-		return err
+	var e *entry
+	var minute int64
+	var committed bool
+	var err error
+	for {
+		if e, err = s.entry(item); err != nil {
+			return err
+		}
+		e.mu.Lock()
+		minute, committed, err = e.record(at, smp)
+		e.mu.Unlock()
+		if !errors.Is(err, errGone) {
+			break
+		}
 	}
-	e.mu.Lock()
-	minute, committed, err := e.record(at, smp)
-	e.mu.Unlock()
 	if committed {
 		s.mu.Lock()
 		fn := s.onMinute
@@ -197,6 +217,9 @@ func (s *Store) Record(item string, at time.Time, smp Sample) error {
 
 // record returns the minute it committed, if any. Called with e.mu held.
 func (e *entry) record(at time.Time, smp Sample) (int64, bool, error) {
+	if e.gone {
+		return 0, false, errGone
+	}
 	if e.closed {
 		return 0, false, ErrClosed
 	}
@@ -295,4 +318,105 @@ func (e *entry) commit() error {
 		vals[i] = minuteValue{a.sum / float64(a.n), a.min, a.max}
 	}
 	return e.ring.writeMinute(e.accMin, vals)
+}
+
+// Forget marks item as gone at the given time: its history stays in Items and
+// Query until Sweep removes it 7 days later; a Record revives it. Beyond
+// MaxForgotten, the items forgotten longest ago are removed at once.
+func (s *Store) Forget(item string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	e := s.items[item]
+	if e == nil {
+		return ErrUnknownItem
+	}
+	// ring.mu orders this header write with a commit in flight.
+	if err := e.ring.setForgotten(max(at.Unix(), 1)); err != nil { // 0 would mean alive
+		return err
+	}
+	var old []string
+	for k, x := range s.items {
+		if x.ring.ForgottenAt() != 0 {
+			old = append(old, k)
+		}
+	}
+	if len(old) <= MaxForgotten {
+		return nil
+	}
+	slices.SortFunc(old, func(a, b string) int {
+		return cmp.Or(cmp.Compare(s.items[a].ring.ForgottenAt(), s.items[b].ring.ForgottenAt()), strings.Compare(a, b))
+	})
+	var errs []error
+	for _, k := range old[:len(old)-MaxForgotten] {
+		errs = append(errs, s.remove(k))
+	}
+	return errors.Join(errs...)
+}
+
+// Sweep removes every item forgotten, or without data, for 7 days or more,
+// every *.ring.tmp and every *.ring.bad older than 7 days. No other file of
+// the directory is touched.
+// ponytail: it reads each stamp column under the store lock; Sweep runs hourly
+// and 256 x 40 KiB is quick, a finer lock is not worth it.
+func (s *Store) Sweep(now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	cut := now.Add(-retention).Unix()
+	var errs []error
+	for k, e := range s.items {
+		e.mu.Lock()
+		newest, err := e.ring.newestMinute()
+		newest *= 60
+		if e.hasLast {
+			newest = max(newest, e.last.Unix())
+		}
+		fa := e.ring.ForgottenAt()
+		e.mu.Unlock()
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case (fa != 0 && fa <= cut) || newest <= cut:
+			errs = append(errs, s.remove(k))
+		}
+	}
+	ents, err := s.fs.ReadDir(s.dir)
+	if err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	for _, d := range ents {
+		name := d.Name()
+		switch {
+		case d.IsDir():
+		case strings.HasSuffix(name, ".ring.tmp"):
+			errs = append(errs, s.fs.Remove(filepath.Join(s.dir, name)))
+		case strings.HasSuffix(name, ".ring.bad"):
+			if info, err := d.Info(); err == nil && info.ModTime().Unix() <= cut {
+				errs = append(errs, s.fs.Remove(filepath.Join(s.dir, name)))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// remove closes the ring of item, then deletes its file (Windows cannot delete
+// an open file). Called with s.mu held. If the delete fails, the file comes
+// back at the next Open and is swept then.
+func (s *Store) remove(item string) error {
+	e := s.items[item]
+	delete(s.items, item)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.gone = true
+	var err error
+	if !e.closed {
+		e.closed = true
+		err = e.ring.Close()
+	}
+	return errors.Join(err, s.fs.Remove(ringPath(s.dir, item)))
 }

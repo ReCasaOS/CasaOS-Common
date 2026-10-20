@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"errors"
 	"math"
 	"slices"
 )
@@ -59,6 +60,15 @@ func (s *Store) Query(item string, r Range) (Result, error) {
 		res.From = res.To - (n-1)*step
 		per := step / 60
 		cells, err := e.ring.readWindow(res.From/60, res.To/60+per-1)
+		if errors.Is(err, errRingClosed) { // closed since the lookup
+			s.mu.RLock()
+			closed = s.closed
+			s.mu.RUnlock()
+			if closed {
+				return Result{}, ErrClosed
+			}
+			return Result{}, ErrUnknownItem
+		}
 		if err != nil {
 			return Result{}, err
 		}

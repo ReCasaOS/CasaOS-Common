@@ -38,8 +38,9 @@ import (
 )
 
 var (
-	errCorrupt = errors.New("stats: corrupt ring file")
-	errVersion = errors.New("stats: unsupported ring file version")
+	errCorrupt    = errors.New("stats: corrupt ring file")
+	errVersion    = errors.New("stats: unsupported ring file version")
+	errRingClosed = errors.New("stats: ring file closed")
 )
 
 const (
@@ -167,6 +168,10 @@ type ring struct {
 
 	keys      atomic.Pointer[[]string]
 	forgotten atomic.Int64
+
+	// cmu lets Close wait for the lock-free readers in flight; writers never take it.
+	cmu    sync.RWMutex
+	closed bool
 }
 
 func (r *ring) publish() {
@@ -178,13 +183,30 @@ func (r *ring) publish() {
 func (r *ring) Item() string       { return r.item }
 func (r *ring) ForgottenAt() int64 { return r.forgotten.Load() }
 func (r *ring) Keys() []string     { return append([]string(nil), *r.keys.Load()...) }
-func (r *ring) Close() error       { return r.f.Close() }
 func (r *ring) series() []string   { return *r.keys.Load() }
 func colOff(i, c int) int64        { return dataStart + colBytes*int64(1+3*i+c) }
 func slotOf(minute int64) int64    { return ((minute % Minutes) + Minutes) % Minutes }
 func putF32(b []byte, v float64)   { binary.LittleEndian.PutUint32(b, math.Float32bits(float32(v))) }
 func getF32(b []byte) float64      { return float64(math.Float32frombits(binary.LittleEndian.Uint32(b))) }
 func nanBits() uint32              { return math.Float32bits(float32(math.NaN())) }
+
+// Close waits for the readers in flight; later reads return errRingClosed.
+func (r *ring) Close() error {
+	r.cmu.Lock()
+	defer r.cmu.Unlock()
+	r.closed = true
+	return r.f.Close()
+}
+
+// rlock holds off Close while a reader uses the file.
+func (r *ring) rlock() error {
+	r.cmu.RLock()
+	if r.closed {
+		r.cmu.RUnlock()
+		return errRingClosed
+	}
+	return nil
+}
 
 // writeHeader makes h (with seq bumped) durable in the copy not currently valid-latest.
 func (r *ring) writeHeader(h header) error {
@@ -384,6 +406,10 @@ func (r *ring) readWindow(fromMin, toMin int64) (map[string][]minuteCell, error)
 	if n < 1 || n > Minutes {
 		return nil, fmt.Errorf("stats: window of %d minutes", n)
 	}
+	if err := r.rlock(); err != nil {
+		return nil, err
+	}
+	defer r.cmu.RUnlock()
 	keys := r.series()
 	first := slotOf(fromMin)
 	segs := [][2]int64{{first, min(n, Minutes-first)}} // slot, count
@@ -437,6 +463,10 @@ func (r *ring) readWindow(fromMin, toMin int64) (map[string][]minuteCell, error)
 }
 
 func (r *ring) newestMinute() (int64, error) {
+	if err := r.rlock(); err != nil {
+		return 0, err
+	}
+	defer r.cmu.RUnlock()
 	b := make([]byte, colBytes)
 	if err := readFull(r.f, b, dataStart); err != nil {
 		return 0, err
