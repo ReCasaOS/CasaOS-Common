@@ -259,10 +259,12 @@ func (e *Evaluator) Resolve(item string) {
 }
 
 // Prune drops the rules and state of the items no longer in the Store.
+// Items is read under e.mu, so the state of an item that commits its first
+// minute meanwhile is not dropped.
 func (e *Evaluator) Prune() {
-	keep := e.store.Items()
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	keep := e.store.Items()
 	for k := range e.items {
 		if _, ok := slices.BinarySearch(keep, k); !ok {
 			delete(e.items, k)

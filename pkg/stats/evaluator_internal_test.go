@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -210,5 +211,41 @@ func TestSetRulesRingReadError(t *testing.T) {
 	var sf stateFile
 	if err := json.Unmarshal(b, &sf); err != nil || sf.Items[evItem] == nil || !slices.Equal(sf.Items[evItem].Rules, want) {
 		t.Fatalf("alerts.json: %s (%v)", b, err)
+	}
+}
+
+// waitMutexBlocked returns once a goroutine running fn is parked on a sync.Mutex.
+func waitMutexBlocked(t *testing.T, fn string) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for i := 0; i < 100000; i++ {
+		n := runtime.Stack(buf, true)
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, fn) && strings.Contains(g, "[sync.Mutex.Lock") {
+				return
+			}
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("%s never blocked", fn)
+}
+
+// State an item gets while Prune runs is not pruned.
+func TestPruneKeepsStateCreatedDuringIt(t *testing.T) {
+	r := newEvRig(t, noSync{osFS})
+	r.ev.mu.Lock()
+	done := make(chan struct{})
+	go func() { r.ev.Prune(); close(done) }()
+	waitMutexBlocked(t, "(*Evaluator).Prune")
+	// The item's first minute: in the Store, then evaluated.
+	feedMinute(t, r.s, evItem, minuteAt(0), high)
+	r.ev.onMinute(evItem, minuteNo(0), map[string]float64{"cpu_high": 95, "mem_high": 95})
+	r.ev.mu.Unlock()
+	<-done
+	r.ev.mu.Lock()
+	st := r.ev.items[evItem]
+	r.ev.mu.Unlock()
+	if st == nil || st.Runs["cpu_high"] != 1 {
+		t.Fatalf("state pruned: %+v", st)
 	}
 }
