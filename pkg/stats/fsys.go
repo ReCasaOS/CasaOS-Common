@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"time"
 )
 
 // file is the subset of *os.File the ring code uses.
@@ -23,6 +24,7 @@ type fsys interface {
 	ReadDir(dir string) ([]os.DirEntry, error)
 	MkdirAll(dir string, perm os.FileMode) error
 	SyncDir(dir string) error
+	Chtimes(name string, t time.Time) error // best effort
 }
 
 type osFileSystem struct{}
@@ -51,3 +53,5 @@ func (osFileSystem) SyncDir(dir string) error {
 	}
 	return nil
 }
+
+func (osFileSystem) Chtimes(name string, t time.Time) error { return os.Chtimes(name, t, t) }

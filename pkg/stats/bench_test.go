@@ -148,14 +148,17 @@ func BenchmarkMinuteValue(b *testing.B) {
 }
 
 func TestRecordTickBudget(t *testing.T) {
-	if testing.Short() || raceEnabled {
-		t.Skip("timing budget: skipped under -short and -race")
+	if raceEnabled {
+		t.Skip("timing budget: skipped under -race")
 	}
 	const ticks = 720 // one simulated hour: 60 heavy ticks
 	for _, withEv := range []bool{false, true} {
 		for _, fsync := range []bool{false, true} {
 			name := fmt.Sprintf("evaluator=%v/fsync=%v", withEv, fsync)
 			t.Run(name, func(t *testing.T) {
+				if fsync && testing.Short() {
+					t.Skip("fsync variants skipped under -short")
+				}
 				var fs fsys = noSync{osFS}
 				if fsync {
 					fs = osFS

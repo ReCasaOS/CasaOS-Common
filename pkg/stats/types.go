@@ -1,7 +1,12 @@
 // Package stats stores per-item resource statistics: 15 minutes at 5 s in
 // memory and 7 days of minutes (avg, min, max per series) in one fixed-size
-// ring file per item. Readers never wait for the writer: Query takes only a read lock on
-// the item map and reads the ring file without the writer's lock. One known limit: after a clock step
+// ring file per item. A query never waits for an item's writer (it reads the
+// ring file without the writer's lock); it takes the store read lock for the
+// lookup, so it can wait behind the creation of an item and behind Forget and
+// Sweep, which hold the store lock. Series keys must be stable: a ring never
+// frees a series slot, so after MaxSeries distinct keys every new key is
+// rejected for the life of the item. An error from Record for which IsPartial
+// is true means the other keys of the sample were stored. One known limit: after a clock step
 // back of more than a minute, a query overlapping the rewrite of the same
 // minute may mix that minute's columns in one point of one response.
 package stats
@@ -113,4 +118,25 @@ func (r Result) MarshalJSON() ([]byte, error) {
 		r.Series = []SeriesData{}
 	}
 	return json.Marshal(plain(r))
+}
+
+// IsPartial reports whether err from Record only says that some keys of the
+// sample were rejected (ErrSeriesCap, ErrBadKey): the other keys were stored,
+// so the caller must neither retry nor drop the sample. It is false for nil and
+// for any error that has another cause, alone or joined.
+func IsPartial(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrSeriesCap) || errors.Is(err, ErrBadKey) {
+		if j, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, e := range j.Unwrap() {
+				if !IsPartial(e) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return false
 }

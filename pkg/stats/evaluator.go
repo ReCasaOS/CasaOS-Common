@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Event is one alert transition; State is "firing" or "resolved".
@@ -214,6 +215,9 @@ func (e *Evaluator) onMinute(item string, m int64, vals map[string]float64) []Ev
 // theirs. On error nothing changes. The alerts of item are then recounted
 // from its history: one that no longer holds resolves, one that now holds fires.
 func (e *Evaluator) SetRules(item string, rules []Rule) error {
+	if !utf8.ValidString(item) {
+		return ErrBadItem
+	}
 	if err := validateRules(rules); err != nil {
 		return err
 	}

@@ -421,6 +421,7 @@ func TestRulesReturnsCopy(t *testing.T) {
 
 func TestStateFileAtomic(t *testing.T) {
 	r := newRig(t)
+	verified := 0
 	check := func(i int) {
 		t.Helper()
 		ents, err := os.ReadDir(r.dir)
@@ -433,6 +434,7 @@ func TestStateFileAtomic(t *testing.T) {
 			}
 		}
 		if _, err := os.Stat(filepath.Join(r.dir, "alerts.json")); err == nil {
+			verified++
 			if v := r.state()["version"]; v != 1.0 {
 				t.Fatalf("minute %d: version %v", i, v)
 			}
@@ -442,6 +444,9 @@ func TestStateFileAtomic(t *testing.T) {
 	for i, v := range vals {
 		r.step(i, v)
 		check(i)
+	}
+	if verified == 0 {
+		t.Fatal("alerts.json never written: nothing was checked")
 	}
 	if len(r.take()) != 4 {
 		t.Fatal("want cpu and mem firing then resolved")

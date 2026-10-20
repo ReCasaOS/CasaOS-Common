@@ -67,7 +67,7 @@ func (l *liveRing) snapshot(now time.Time) (from, to int64, series map[string][]
 		out := make([]float64, LiveSlots)
 		for i := range out {
 			s := first + int64(i)
-			idx := int(s % LiveSlots)
+			idx := int(((s % LiveSlots) + LiveSlots) % LiveSlots) // s < 0 while the clock is under 895 s
 			if l.stamp[idx] == s {
 				out[i] = col[idx]
 			} else {

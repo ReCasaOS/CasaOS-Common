@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // retention is how long a forgotten or silent item, and a *.ring.bad, are kept.
@@ -32,6 +33,7 @@ type Store struct {
 	mu          sync.RWMutex // guards the fields below
 	items       map[string]*entry
 	quarantined []string
+	skipped     []string
 	onMinute    func(item string, minute time.Time)
 	closed      bool
 }
@@ -82,12 +84,16 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 			switch {
 			case errors.Is(err, errCorrupt) || errors.Is(err, errVersion):
 				if fs.Rename(p, p+".bad") != nil {
-					continue // left in place, unknown; a Record of its item recreates it
+					s.skipped = append(s.skipped, name) // left in place; a Record of its item recreates it
+					continue
 				}
+				// The age of a *.bad counts from now, not from the old mtime.
+				_ = fs.Chtimes(p+".bad", clock.Now())
 				s.quarantined = append(s.quarantined, name)
 			case err != nil:
-				_ = s.closeAll()
-				return nil, err
+				// Unreadable (read-only, dangling or directory symlink, I/O error):
+				// one bad file must not take every other item down.
+				s.skipped = append(s.skipped, name)
 			default:
 				s.items[r.item] = &entry{ring: r, live: newLiveRing()}
 			}
@@ -137,6 +143,15 @@ func (s *Store) Quarantined() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.quarantined)
+}
+
+// Skipped returns the ring files Open could not read for a reason other than
+// corruption (permissions, a dangling symlink, an I/O error) and left in
+// place; their items are absent from the store.
+func (s *Store) Skipped() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.skipped)
 }
 
 // SetOnMinute sets the hook called once per item per committed minute.
@@ -217,7 +232,7 @@ func (s *Store) entry(name string) (*entry, error) {
 
 // Record adds one sample of item taken at the given time.
 func (s *Store) Record(item string, at time.Time, smp Sample) error {
-	if len(item) < 1 || len(item) > MaxItemLen {
+	if len(item) < 1 || len(item) > MaxItemLen || !utf8.ValidString(item) {
 		return ErrBadItem
 	}
 	if at.Unix() < 0 {
