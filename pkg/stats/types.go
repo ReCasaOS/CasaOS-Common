@@ -1,6 +1,7 @@
 // Package stats stores per-item resource statistics: 15 minutes at 5 s in
 // memory and 7 days of minutes (avg, min, max per series) in one fixed-size
-// ring file per item, read without a lock. One known limit: after a clock step
+// ring file per item. Readers never wait for the writer: Query takes only a read lock on
+// the item map and reads the ring file without the writer's lock. One known limit: after a clock step
 // back of more than a minute, a query overlapping the rewrite of the same
 // minute may mix that minute's columns in one point of one response.
 package stats

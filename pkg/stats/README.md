@@ -4,7 +4,7 @@ Per-item resource statistics: 15 minutes at 5 s in memory, 7 days of minutes on 
 
 ## Format and limits
 
-One fixed-size ring file per item, `<hash of the item>.ring`, read without a lock.
+One fixed-size ring file per item, `<hash of the item>.ring`. A query never waits for the writer: it takes a read lock on the item map only and reads the ring file without the writer's lock.
 
 - Layout: an 8192-byte header area (two header copies, format version 1, item name, series keys), then columns of `Minutes` (10 080) cells. Column 0 holds the minute stamps (4 bytes each); every series adds three columns (avg, min, max; float32). A cell holds no value when its stamp does not match the minute.
 - Size is a pure function of the series count: `8192 + 40320 x (1 + 3 x series)` bytes. It never changes while the ring wraps.
@@ -12,6 +12,30 @@ One fixed-size ring file per item, `<hash of the item>.ring`, read without a loc
 - Worst case for the directory: (256 live + 256 forgotten) x 5.6 MiB = 2.8 GiB. Realistic case: 41 items of 24 series, about 115 MiB.
 - Memory: 180 live slots per series, no growth with time.
 - `*.ring.bad` (a quarantined file) is kept once per item; `alerts.json` only holds items that differ from defaults or are active, and is pruned with the store.
+
+## How to wire
+
+```go
+st, _ := stats.Open(dir, stats.SystemClock{})
+ev, _ := stats.NewEvaluator(st, dir, emit) // emit(Event) must not block
+st.SetOnMinute(ev.OnMinute)                // the only wiring; services never call OnMinute
+// at start, per item that has history:   ev.Rebuild(item)
+// every 5 s, per item:                   st.Record(item, now, sample)
+// item stops being measured:             ev.Resolve(item)
+// item removed:                          ev.Resolve(item); st.Forget(item, now)
+// hourly:                                st.Sweep(now); ev.Prune()
+```
+
+Notes:
+
+- Use one sampling goroutine per item. `Record` calls for one item from two goroutines are safe for the data, but the `OnMinute` hooks they trigger can run out of order.
+- A `Record` that crosses a minute boundary commits the previous minute at the cost of two fsyncs per item; see [Cost](#cost) before sampling many items from one goroutine.
+- `Prune` drops the rules and state of every item no longer in the store, including an item that has rules but never recorded.
+- `Evaluator.LastError()` returns the error of the last write of `alerts.json` (nil once a later write succeeds); the service can log or expose it.
+
+## Extensions
+
+Beyond the base contract: `SetOnMinute` (the single hook), `Evaluator.Resolve`, `Evaluator.Prune`, `Evaluator.LastError`, `SystemClock` and `FakeClock`, `Store.Quarantined`, the exported errors (`ErrUnknownItem`, `ErrBadRange`, `ErrBadItem`, `ErrBadKey`, `ErrSeriesCap`, `ErrTooManyItems`, `ErrOutOfOrder`, `ErrClosed`, `*RuleError`), the exported constants (`Minutes`, `LiveSlots`, `MaxSeries`, `MaxItems`, `MaxForgotten`, `MaxKeyLen`, `MaxItemLen`, `FormatVersion`, `MaxFileSize`) and `SplitKey`. Query results: series of chart `alert` are never returned, a series with no data in the window is omitted, `live` points have Min = Max = Avg, floats are stored as float32.
 
 ## Measured cost
 

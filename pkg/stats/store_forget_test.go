@@ -431,23 +431,27 @@ func TestSweepBadAgeEdge(t *testing.T) {
 	}
 }
 
-// Forgotten at the same time, the first name is evicted first.
+// Forgotten at the same time, the first name is evicted first. The candidates
+// come from a map in random order, so the scenario is repeated: without the
+// tie-break "a" would survive a run only by being sorted first by chance.
 func TestForgottenCapTieBreakByName(t *testing.T) {
-	s, dir := openTest(t)
 	names := []string{"a"}
 	for i := 0; i < MaxForgotten; i++ {
 		names = append(names, fmt.Sprintf("b%03d", i))
 	}
-	for _, n := range names {
-		if err := s.Record(n, minuteAt(0), Sample{"a/b": 1}); err != nil {
-			t.Fatal(err)
+	for run := 0; run < 5; run++ {
+		s, dir := openTest(t)
+		for _, n := range names {
+			if err := s.Record(n, minuteAt(0), Sample{"a/b": 1}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Forget(n, minuteAt(0)); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if err := s.Forget(n, minuteAt(0)); err != nil {
-			t.Fatal(err)
+		if exists(ringPath(dir, "a")) || !exists(ringPath(dir, "b000")) || len(s.Items()) != MaxForgotten {
+			t.Fatalf("run %d: evicted the wrong one: %d items", run, len(s.Items()))
 		}
-	}
-	if exists(ringPath(dir, "a")) || !exists(ringPath(dir, "b000")) || len(s.Items()) != MaxForgotten {
-		t.Fatalf("evicted the wrong one: %d items", len(s.Items()))
 	}
 }
 

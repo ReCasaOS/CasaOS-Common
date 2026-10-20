@@ -81,7 +81,6 @@ func newEvaluator(store *Store, dir string, emit func(Event), fs fsys) (*Evaluat
 		err = e.load(b)
 	}
 	if err != nil {
-		_ = e.fs.Remove(e.path + ".bad")
 		_ = e.fs.Rename(e.path, e.path+".bad") // best effort: the service runs on defaults either way
 		return e, nil
 	}

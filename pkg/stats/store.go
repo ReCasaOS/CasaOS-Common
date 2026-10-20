@@ -81,7 +81,6 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 			}
 			switch {
 			case errors.Is(err, errCorrupt) || errors.Is(err, errVersion):
-				_ = fs.Remove(p + ".bad")
 				if fs.Rename(p, p+".bad") != nil {
 					continue // left in place, unknown; a Record of its item recreates it
 				}

@@ -85,7 +85,7 @@ func runFaulted(t *testing.T, ff *faultFS, dir string, start int, progress *int)
 // nothing, nothing else, no quarantine, and a store that still works. With
 // old, the slots held minutes start-Minutes.. (see prefillOld): each of them
 // reads whole or as a gap, never with values of the new minute.
-func checkAfterCrash(t *testing.T, dir string, start int, old bool, progress int) {
+func checkAfterCrash(t *testing.T, dir string, start int, old bool, progress int) (served int) {
 	t.Helper()
 	s, err := Open(dir, NewFakeClock(minuteAt(start+13)))
 	if err != nil {
@@ -144,6 +144,9 @@ func checkAfterCrash(t *testing.T, dir string, start int, old bool, progress int
 				if c.OK && (c.Avg != oldValue(j, i) || c.Min != oldValue(j, i) || c.Max != oldValue(j, i)) {
 					t.Fatalf("old minute %d of %s served as %+v", j, k, c)
 				}
+				if c.OK {
+					served++
+				}
 				if c.OK && j < progress {
 					t.Fatalf("old minute %d of %s still served after its slot was reused", j, k)
 				}
@@ -160,10 +163,11 @@ func checkAfterCrash(t *testing.T, dir string, start int, old bool, progress int
 			if p := sd.Points[len(sd.Points)-3]; p.T != minuteAt(start+10).Unix() || p.Avg == nil || *p.Avg != 7 {
 				t.Fatalf("new minute not readable: %+v", p)
 			}
-			return
+			return served
 		}
 	}
 	t.Fatal("new minute not readable")
+	return served
 }
 
 // oldValue is the value prefillOld writes for series i in old minute j.
@@ -201,10 +205,10 @@ func prefillOld(t *testing.T, dir string, start int) {
 
 // faultLoop runs the scenario once per fault position n = 1.. (fault sets
 // it) until a run completes, checking after each, and returns the number of
-// positions that faulted.
-func faultLoop(t *testing.T, start int, old bool, fault func(ff *faultFS, n int)) int {
+// positions that faulted and the number of old cells served over all runs.
+func faultLoop(t *testing.T, start int, old bool, fault func(ff *faultFS, n int)) (n, served int) {
 	t.Helper()
-	for n := 1; n <= 1000; n++ {
+	for n = 1; n <= 1000; n++ {
 		dir := t.TempDir()
 		if old {
 			prefillOld(t, dir, start)
@@ -213,20 +217,20 @@ func faultLoop(t *testing.T, start int, old bool, fault func(ff *faultFS, n int)
 		fault(ff, n)
 		progress := 0
 		killed := runFaulted(t, ff, dir, start, &progress)
-		checkAfterCrash(t, dir, start, old, progress)
+		served += checkAfterCrash(t, dir, start, old, progress)
 		if !killed {
-			return n - 1
+			return n - 1, served
 		}
 	}
 	t.Fatal("still faulting after 1000 positions")
-	return 0
+	return 0, 0
 }
 
 func killAt(ff *faultFS, n int) { ff.killAt = n }
 func tornAt(ff *faultFS, n int) { ff.tornAt = n }
 
 func TestKillAtEveryWriteStep(t *testing.T) {
-	n := faultLoop(t, 0, false, killAt)
+	n, _ := faultLoop(t, 0, false, killAt)
 	if n < 40 {
 		t.Fatalf("only %d write steps", n)
 	}
@@ -235,7 +239,7 @@ func TestKillAtEveryWriteStep(t *testing.T) {
 
 func TestTornWriteAtEveryWriteStep(t *testing.T) {
 	// creation image, then a column image and a header per series (3), then Forget's header
-	if n := faultLoop(t, 0, false, tornAt); n != 8 {
+	if n, _ := faultLoop(t, 0, false, tornAt); n != 8 {
 		t.Fatalf("%d large writes, want 8", n)
 	}
 }
@@ -245,9 +249,15 @@ func TestKillAtEveryWriteStepReusedSlots(t *testing.T) {
 	if slotOf(minuteNo(reuseStart())) != Minutes-2 {
 		t.Fatal("reuseStart")
 	}
-	n := faultLoop(t, reuseStart(), true, killAt)
+	n, served := faultLoop(t, reuseStart(), true, killAt)
+	if n == 0 || served == 0 {
+		t.Fatalf("kill loop: %d faults, %d old cells served", n, served)
+	}
 	t.Logf("killed at each of %d write steps", n)
-	faultLoop(t, reuseStart(), true, tornAt)
+	n, served = faultLoop(t, reuseStart(), true, tornAt)
+	if n == 0 || served == 0 {
+		t.Fatalf("torn loop: %d faults, %d old cells served", n, served)
+	}
 }
 
 // createRing writes its image to a temp file, syncs it, then renames it.

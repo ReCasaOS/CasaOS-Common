@@ -56,8 +56,8 @@ func TestMaxFileSize(t *testing.T) {
 		t.Fatalf("worst directory %d", worst)
 	}
 	// A realistic 41 items of 24 series: about 115 MiB.
-	if real := 41 * ringFileSize(24); real != 121013632 {
-		t.Fatalf("41 items %d", real)
+	if realistic := 41 * ringFileSize(24); realistic != 121013632 {
+		t.Fatalf("41 items %d", realistic)
 	}
 }
 
