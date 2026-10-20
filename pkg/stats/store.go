@@ -162,6 +162,15 @@ func (s *Store) Skipped() []string {
 	return slices.Clone(s.skipped)
 }
 
+// Unreadable reports whether a Record of item returns ErrRingSkipped: its ring
+// file exists but Open could not read it. A corrupt file that Open could not
+// move aside does not count: Record replaces it.
+func (s *Store) Unreadable(item string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refused[filepath.Base(ringPath(s.dir, item))]
+}
+
 // SetOnMinute sets the hook called once per item per committed minute.
 func (s *Store) SetOnMinute(fn func(item string, minute time.Time)) {
 	s.mu.Lock()
