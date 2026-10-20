@@ -102,3 +102,14 @@ func TestLiveReset(t *testing.T) {
 		t.Fatalf("series after reset: %d", len(s))
 	}
 }
+
+func TestLiveWrappedSlotNotReadAsCurrent(t *testing.T) {
+	l := newLiveRing()
+	l.put(liveT0, Sample{"a/b": 7})
+	_, _, s := l.snapshot(liveT0.Add(LiveSlots * 5 * time.Second))
+	for i, v := range s["a/b"] {
+		if !math.IsNaN(v) {
+			t.Fatalf("slot %d reads stale %v", i, v)
+		}
+	}
+}
