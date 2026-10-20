@@ -131,7 +131,7 @@ func BenchmarkRecordTick(b *testing.B) {
 }
 
 // BenchmarkMinuteValue is the cost of the Evaluator reading one alert value
-// (it reads the minute of every series of the item).
+// (it reads only the requested series).
 func BenchmarkMinuteValue(b *testing.B) {
 	r := newTickRig(b, noSync{osFS}, false)
 	for i := 0; i < 24; i++ {
@@ -177,12 +177,13 @@ func TestRecordTickBudget(t *testing.T) {
 				if withEv {
 					meanMax = 25 * time.Millisecond // the Evaluator is part of the same service budget
 				}
-				switch {
-				case !fsync && mean >= meanMax:
+				if !fsync && mean >= meanMax {
 					t.Errorf("mean tick %v >= %v (worst %v)", mean, meanMax, worst)
-				case !fsync && allocs/ticks >= 5000:
+				}
+				if !fsync && allocs/ticks >= 5000 {
 					t.Errorf("%d allocs per tick >= 5000", allocs/ticks)
-				case worst >= 15*time.Second:
+				}
+				if worst >= 15*time.Second {
 					t.Errorf("worst tick %v >= 15s (mean %v): hang", worst, mean)
 				}
 			})

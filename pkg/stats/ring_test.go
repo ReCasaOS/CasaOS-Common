@@ -111,7 +111,7 @@ func TestReadWindowOnlyKeys(t *testing.T) {
 	_, _ = r.addSeries("cpu/user")
 	_, _ = r.addSeries("cpu/system")
 	require.NoError(t, r.writeMinute(100, map[int]minuteValue{0: {1.5, 1, 2}, 1: {3, 3, 3}}))
-	w, err := r.readWindow(100, 100, "cpu/system", "absent/key")
+	w, err := r.readWindow(100, 100, "absent/key", "cpu/system")
 	require.NoError(t, err)
 	assert.Equal(t, map[string][]minuteCell{"cpu/system": {{3, 3, 3, true}}}, w)
 }

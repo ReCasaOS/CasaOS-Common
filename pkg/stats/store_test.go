@@ -563,3 +563,25 @@ func TestCloseThenRecord(t *testing.T) {
 		t.Fatalf("second close: %v", err)
 	}
 }
+
+// minuteValue sits on the Evaluator's path, twice per item per minute: it must
+// read the requested series only, not the 48 of the item.
+func TestMinuteValueReadsOnlyItsSeries(t *testing.T) {
+	s, _ := openTest(t)
+	smp := Sample{}
+	for i := 0; i < MaxSeries; i++ {
+		smp[fmt.Sprintf("c/k%02d", i)] = float64(i)
+	}
+	feedMinute(t, s, "it", minuteAt(1), func(int) Sample { return smp })
+	m := minuteAt(1).Unix() / 60
+	v, ok, err := s.minuteValue("it", "c/k07", m)
+	if err != nil || !ok || v != 7 {
+		t.Fatalf("got %v %v %v", v, ok, err)
+	}
+	if _, ok, _ := s.minuteValue("it", "c/none", m); ok {
+		t.Fatal("absent series reported present")
+	}
+	if allocs := testing.AllocsPerRun(20, func() { _, _, _ = s.minuteValue("it", "c/k07", m) }); allocs >= 40 {
+		t.Fatalf("%v allocs: reading all 48 series costs about 340, the requested one about 14", allocs)
+	}
+}
