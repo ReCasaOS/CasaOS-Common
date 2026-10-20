@@ -3,6 +3,7 @@ package stats
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 const (
@@ -65,9 +66,12 @@ func (p Point) MarshalJSON() ([]byte, error) {
 }
 
 func (p *Point) UnmarshalJSON(b []byte) error {
-	var a [4]json.RawMessage
+	var a []json.RawMessage
 	if err := json.Unmarshal(b, &a); err != nil {
 		return err
+	}
+	if len(a) != 4 {
+		return fmt.Errorf("stats: point has %d elements, want 4", len(a))
 	}
 	if err := json.Unmarshal(a[0], &p.T); err != nil {
 		return err
@@ -94,4 +98,13 @@ type Result struct {
 	From        int64        `json:"from"`
 	To          int64        `json:"to"`
 	Series      []SeriesData `json:"series"` // never nil: empty gives "series":[]
+}
+
+// MarshalJSON writes a nil Series as [].
+func (r Result) MarshalJSON() ([]byte, error) {
+	type plain Result
+	if r.Series == nil {
+		r.Series = []SeriesData{}
+	}
+	return json.Marshal(plain(r))
 }

@@ -39,6 +39,19 @@ func TestPointJSON(t *testing.T) {
 	}
 }
 
+func TestPointJSONRejectsWrongLength(t *testing.T) {
+	for _, in := range []string{`[]`, `[60,1,2]`, `[60,1,2,3,4]`} {
+		var p Point
+		assert.Error(t, json.Unmarshal([]byte(in), &p), in)
+	}
+}
+
+func TestResultNilSeriesJSON(t *testing.T) {
+	b, err := json.Marshal(Result{Range: Range7d})
+	require.NoError(t, err)
+	assert.Equal(t, `{"range":"7d","step_seconds":0,"from":0,"to":0,"series":[]}`, string(b))
+}
+
 func TestResultJSON(t *testing.T) {
 	r := Result{Range: Range1h, StepSeconds: 60, From: 0, To: 60, Series: []SeriesData{
 		{Chart: "cpu", Name: "user", Unit: "percent", Points: []Point{{T: 60, Avg: f(1)}}},

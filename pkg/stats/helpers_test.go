@@ -2,6 +2,7 @@ package stats
 
 import (
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -40,3 +41,33 @@ func (n noSync) OpenFile(name string, flag int, perm os.FileMode) (file, error) 
 type noSyncFile struct{ file }
 
 func (noSyncFile) Sync() error { return nil }
+
+// blockingFS parks the first file write made while armed: it closes entered,
+// then waits for release to be closed before writing.
+type blockingFS struct {
+	fsys
+	armed   *atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b blockingFS) OpenFile(name string, flag int, perm os.FileMode) (file, error) {
+	fl, err := b.fsys.OpenFile(name, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return blockingFile{fl, b}, nil
+}
+
+type blockingFile struct {
+	file
+	b blockingFS
+}
+
+func (f blockingFile) WriteAt(p []byte, off int64) (int, error) {
+	if f.b.armed.CompareAndSwap(true, false) {
+		close(f.b.entered)
+		<-f.b.release
+	}
+	return f.file.WriteAt(p, off)
+}

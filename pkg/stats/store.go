@@ -18,7 +18,7 @@ type Store struct {
 	clock Clock
 	fs    fsys
 
-	mu          sync.Mutex // guards the fields below
+	mu          sync.RWMutex // guards the fields below
 	items       map[string]*entry
 	quarantined []string
 	onMinute    func(item string, minute time.Time)

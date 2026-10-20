@@ -19,6 +19,8 @@ type FakeClock struct {
 	t  time.Time
 }
 
+var _ Clock = (*FakeClock)(nil)
+
 func NewFakeClock(t time.Time) *FakeClock { return &FakeClock{t: t} }
 
 func (c *FakeClock) Now() time.Time {
