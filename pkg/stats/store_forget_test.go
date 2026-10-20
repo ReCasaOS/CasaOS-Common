@@ -391,3 +391,135 @@ func TestRecordAfterRemovalRetries(t *testing.T) {
 		t.Fatal("no new ring")
 	}
 }
+
+// remove marks the entry so that a Record holding it looks the item up again.
+func TestRemoveMarksEntryGone(t *testing.T) {
+	s, _ := openTest(t)
+	if err := s.Record("x", minuteAt(0), Sample{"a/b": 1}); err != nil {
+		t.Fatal(err)
+	}
+	old := s.items["x"]
+	s.mu.Lock()
+	err := s.remove("x")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.mu.Lock()
+	_, _, err = old.record(minuteAt(1), Sample{"a/b": 2})
+	old.mu.Unlock()
+	if !errors.Is(err, errGone) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSweepBadAgeEdge(t *testing.T) {
+	s, dir := openTest(t)
+	now := minuteAt(0).Add(30 * 24 * time.Hour)
+	for n, mt := range map[string]time.Time{"edge.ring.bad": now.Add(-week), "young.ring.bad": now.Add(-week + time.Second)} {
+		p := filepath.Join(dir, n)
+		if err := os.WriteFile(p, []byte(n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustSweep(t, s, now)
+	if exists(filepath.Join(dir, "edge.ring.bad")) || !exists(filepath.Join(dir, "young.ring.bad")) {
+		t.Fatal("wrong .bad removed at the 7-day edge")
+	}
+}
+
+// Forgotten at the same time, the first name is evicted first.
+func TestForgottenCapTieBreakByName(t *testing.T) {
+	s, dir := openTest(t)
+	names := []string{"a"}
+	for i := 0; i < MaxForgotten; i++ {
+		names = append(names, fmt.Sprintf("b%03d", i))
+	}
+	for _, n := range names {
+		if err := s.Record(n, minuteAt(0), Sample{"a/b": 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Forget(n, minuteAt(0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if exists(ringPath(dir, "a")) || !exists(ringPath(dir, "b000")) || len(s.Items()) != MaxForgotten {
+		t.Fatalf("evicted the wrong one: %d items", len(s.Items()))
+	}
+}
+
+// A second Forget overwrites the time: the 7 days count from it.
+func TestForgetTwiceOverwrites(t *testing.T) {
+	s, _ := openTest(t)
+	feedMinute(t, s, "x", minuteAt(0), constSample(Sample{"a/b": 1}))
+	second := minuteAt(0).Add(-time.Hour)
+	for _, at := range []time.Time{minuteAt(0), second} {
+		if err := s.Forget("x", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.items["x"].ring.ForgottenAt(); got != second.Unix() {
+		t.Fatalf("forgottenAt=%d", got)
+	}
+	mustSweep(t, s, second.Add(week))
+	if len(s.Items()) != 0 {
+		t.Fatal("kept past 7 days from the second Forget")
+	}
+}
+
+// A ring that cannot be read is kept and reported; the others are still swept.
+func TestSweepGoesOnAfterReadError(t *testing.T) {
+	s, _ := openTest(t)
+	for _, n := range []string{"broken", "stale"} {
+		feedMinute(t, s, n, minuteAt(0), constSample(Sample{"a/b": 1}))
+	}
+	if err := s.items["broken"].ring.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := s.Sweep(minuteAt(0).Add(8 * 24 * time.Hour))
+	if !errors.Is(err, errRingClosed) {
+		t.Fatalf("err=%v", err)
+	}
+	if !slices.Equal(s.Items(), []string{"broken"}) {
+		t.Fatalf("Items=%q", s.Items())
+	}
+}
+
+// infoFailFS returns directory entries whose Info fails for *.ring.bad.
+type infoFailFS struct{ fsys }
+
+type infoFailEntry struct{ os.DirEntry }
+
+func (e infoFailEntry) Info() (os.FileInfo, error) { return nil, errInjected }
+
+func (f infoFailFS) ReadDir(dir string) ([]os.DirEntry, error) {
+	ents, err := f.fsys.ReadDir(dir)
+	for i, e := range ents {
+		if strings.HasSuffix(e.Name(), ".ring.bad") {
+			ents[i] = infoFailEntry{e}
+		}
+	}
+	return ents, err
+}
+
+func TestSweepReportsBadInfoError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := open(dir, NewFakeClock(t0), infoFailFS{noSync{osFS}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := filepath.Join(dir, "x.ring.bad")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sweep(minuteAt(0)); !errors.Is(err, errInjected) {
+		t.Fatalf("err=%v", err)
+	}
+	if !exists(p) {
+		t.Fatal("removed without knowing its age")
+	}
+}

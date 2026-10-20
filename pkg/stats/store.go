@@ -359,8 +359,10 @@ func (s *Store) Forget(item string, at time.Time) error {
 // Sweep removes every item forgotten, or without data, for 7 days or more,
 // every *.ring.tmp and every *.ring.bad older than 7 days. No other file of
 // the directory is touched.
-// ponytail: it reads each stamp column under the store lock; Sweep runs hourly
-// and 256 x 40 KiB is quick, a finer lock is not worth it.
+// ponytail: it holds the store lock for the whole pass, reading each stamp
+// column, waiting on each entry lock (a commit in flight) and, for a removed
+// ring, on the queries still reading it; Sweep runs hourly and 256 x 40 KiB is
+// quick, a finer lock is not worth it.
 func (s *Store) Sweep(now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -396,7 +398,11 @@ func (s *Store) Sweep(now time.Time) error {
 		case strings.HasSuffix(name, ".ring.tmp"):
 			errs = append(errs, s.fs.Remove(filepath.Join(s.dir, name)))
 		case strings.HasSuffix(name, ".ring.bad"):
-			if info, err := d.Info(); err == nil && info.ModTime().Unix() <= cut {
+			info, err := d.Info()
+			switch {
+			case err != nil:
+				errs = append(errs, err)
+			case info.ModTime().Unix() <= cut:
 				errs = append(errs, s.fs.Remove(filepath.Join(s.dir, name)))
 			}
 		}
