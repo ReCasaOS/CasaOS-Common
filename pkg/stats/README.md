@@ -43,6 +43,7 @@ Notes:
 - `Prune` drops the rules and state of every item no longer in the store, including an item that has rules but never recorded.
 - Events are emitted in the order of the state changes that made them, across items, outside every lock. Each state change queues its events; the call that finds no one emitting becomes the drainer and emits the queue until it is empty, so one goroutine (a `Record`, a route's `SetRules`) may emit events made by other goroutines. A slow `emit` delays the later events only, never a state change, a read or another call, which queues and returns. `emit` may call back into the Evaluator (`Resolve`, `SetRules`, `Rebuild`): its events are queued and emitted after the current `emit` returns. If `emit` panics, the panic reaches the drainer's caller, the event it was given counts as emitted, the rest go back to the front of the queue and the next call that changes or evaluates state (`SetRules`, `Rebuild`, `Resolve`, `OnMinute`; not `Prune`, which changes state but does not drain) emits them.
 - `Resolve`, `SetRules`, `Rebuild` and `Record`/`OnMinute` can return BEFORE their own events have been emitted: when another goroutine is draining the queue, or after a panic in `emit` until a later call drains the leftovers. There is no flush at shutdown: a caller that does `ev.Resolve(item); st.Forget(item)` and then exits can lose the `resolved` event. A caller that needs its events delivered waits for them itself (for example in its `emit`).
+- `Close` commits the pending minute of every item before it closes the rings: the samples of the minute in progress are written as a partial minute (avg, min and max of the samples held, alert series included) and the `OnMinute` hook is called for it, outside the store lock, after the hooks of `Record` calls in flight. A restart within the next minute therefore loses no minute and an alert run keeps counting; a downtime that covers one or more whole minutes is still a gap and restarts the run. An item with no pending sample writes nothing. No hook runs after `Close` returns. The hook must not wait for `Close` (a second `Close` returns `ErrClosed` at once).
 - `Evaluator.LastError()` returns the error of the last write of `alerts.json` (nil once a later write succeeds); the service can log or expose it.
 
 ## Extensions
@@ -56,6 +57,10 @@ Added in v0.4.29:
 - File modes 0750 (directory) and 0640 (files), existing ones narrowed at `Open`: see [Format and limits](#format-and-limits).
 
 - Emit order: events are queued and emitted in the order of the state changes, by one drainer at a time, and `emit` may re-enter; see the notes of [How to wire](#how-to-wire).
+
+Added in v0.4.30:
+
+- `Close` commits the pending (partial) minute and calls the hook for it, then closes; before, that minute was dropped and a restart across a minute boundary reset alert runs. See the notes of [How to wire](#how-to-wire).
 
 ## Measured cost
 

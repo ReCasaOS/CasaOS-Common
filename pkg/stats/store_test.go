@@ -163,7 +163,7 @@ func TestCommitOnlyOnRollover(t *testing.T) {
 	}
 }
 
-func TestPartialMinuteLostOnCloseIsOnlyLastMinute(t *testing.T) {
+func TestCloseCommitsPartialMinute(t *testing.T) {
 	dir := t.TempDir()
 	s, err := open(dir, NewFakeClock(t0), noSync{osFS})
 	if err != nil {
@@ -191,8 +191,9 @@ func TestPartialMinuteLostOnCloseIsOnlyLastMinute(t *testing.T) {
 			t.Fatalf("minute %d: %+v", i, c[i])
 		}
 	}
-	if c[3].OK {
-		t.Fatalf("pending minute stored: %+v", c[3])
+	// Close committed the pending minute: 4 (the rollover sample) and six 9s.
+	if want := (minuteCell{float64(float32(58.0 / 7)), 4, 9, true}); c[3] != want {
+		t.Fatalf("pending minute: %+v, want %+v", c[3], want)
 	}
 }
 
