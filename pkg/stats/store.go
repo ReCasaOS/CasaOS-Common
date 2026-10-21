@@ -116,7 +116,15 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 // so that a restart within the next minute loses no minute; an item with no
 // pending sample writes nothing. It then closes every ring file. It waits for
 // the hooks of Records in flight and calls its own outside the store lock; no
-// hook runs after it returns. Later calls return ErrClosed.
+// hook runs after it returns. A hook must NOT call Close: Close waits for that
+// hook, so it deadlocks. Later calls return ErrClosed.
+//
+// It costs about two fsyncs per item with a pending minute, one item after the
+// other. After a restart inside the same wall minute, the next commit of that
+// minute overwrites its slot with the samples taken after the restart only; the
+// evaluator judged the minute on the partial written here and ignores the
+// rewrite (same minute as its Last), so that minute's history can differ from
+// what the evaluator saw.
 func (s *Store) Close() (err error) {
 	s.mu.Lock()
 	if s.closed {
