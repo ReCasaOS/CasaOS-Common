@@ -198,7 +198,8 @@ func TestMemoryBounded(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if g := runtime.NumGoroutine(); g != g0 {
+	// a goroutine of an earlier test may still be ending when g0 is read, so fewer is fine; more is a leak
+	if g := runtime.NumGoroutine(); g > g0 {
 		t.Fatalf("goroutines %d -> %d", g0, g)
 	}
 }

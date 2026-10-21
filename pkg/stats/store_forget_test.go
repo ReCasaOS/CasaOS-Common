@@ -152,11 +152,12 @@ func TestSweepStaleAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	mustSweep(t, s, minuteAt(0).Add(week-time.Second))
+	// Close committed minute 1 (the rollover sample of feedMinute): it is the newest.
+	mustSweep(t, s, minuteAt(1).Add(week-time.Second))
 	if len(s.Items()) != 1 {
 		t.Fatal("removed early")
 	}
-	mustSweep(t, s, minuteAt(0).Add(week))
+	mustSweep(t, s, minuteAt(1).Add(week))
 	if len(s.Items()) != 0 {
 		t.Fatal("kept")
 	}

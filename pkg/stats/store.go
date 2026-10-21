@@ -37,6 +37,8 @@ type Store struct {
 	refused     map[string]bool // unreadable (not corrupt) ring files: never overwritten
 	onMinute    func(item string, minute time.Time)
 	closed      bool
+
+	hooks sync.WaitGroup // Records between a commit and the end of its hook
 }
 
 type entry struct {
@@ -109,28 +111,65 @@ func open(dir string, clock Clock, fs fsys) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) closeAll() error {
+// Close commits the pending minute of every item, as a minute rollover does
+// (the average, min and max of the samples it holds, then the on-minute hook),
+// so that a restart within the next minute loses no minute; an item with no
+// pending sample writes nothing. It then closes every ring file. It waits for
+// the hooks of Records in flight and calls its own outside the store lock; no
+// hook runs after it returns. A hook must NOT call Close: Close waits for that
+// hook, so it deadlocks. Later calls return ErrClosed.
+//
+// It costs about two fsyncs per item with a pending minute, one item after the
+// other. After a restart inside the same wall minute, the next commit of that
+// minute overwrites its slot with the samples taken after the restart only; the
+// evaluator judged the minute on the partial written here and ignores the
+// rewrite (same minute as its Last), so that minute's history can differ from
+// what the evaluator saw.
+func (s *Store) Close() (err error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	s.closed = true // no Forget, Sweep or new entry from here: the map is fixed
+	fn := s.onMinute
+	items := make(map[string]*entry, len(s.items))
+	for k, e := range s.items {
+		items[k] = e
+	}
+	s.mu.Unlock()
+
 	var errs []error
-	for _, e := range s.items {
-		e.mu.Lock()
-		if !e.closed {
-			e.closed = true
+	defer func() {
+		// Rings close last: the hooks read the minute they are given.
+		for _, e := range items {
 			errs = append(errs, e.ring.Close())
+		}
+		err = errors.Join(errs...)
+	}()
+	committed := map[string]int64{}
+	for k, e := range items {
+		e.mu.Lock()
+		e.closed = true // a later Record returns ErrClosed
+		if e.acc != nil {
+			if cerr := e.commit(); cerr != nil {
+				errs = append(errs, cerr)
+			} else {
+				committed[k] = e.accMin
+			}
+			e.acc = nil
 		}
 		e.mu.Unlock()
 	}
-	return errors.Join(errs...)
-}
-
-// Close closes every ring file; later calls return ErrClosed.
-func (s *Store) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return ErrClosed
+	// Every Record that committed a minute did hooks.Add under its entry lock,
+	// taken above, so its hook comes before the one of the next minute.
+	s.hooks.Wait()
+	if fn != nil {
+		for k, m := range committed {
+			fn(k, time.Unix(m*60, 0).UTC())
+		}
 	}
-	s.closed = true
-	return s.closeAll()
+	return nil
 }
 
 // Items returns every item with history, forgotten ones included, sorted.
@@ -270,12 +309,16 @@ func (s *Store) Record(item string, at time.Time, smp Sample) error {
 		}
 		e.mu.Lock()
 		minute, committed, err = e.record(at, smp)
+		if committed {
+			s.hooks.Add(1) // under e.mu, so Close, which takes it, waits for this hook
+		}
 		e.mu.Unlock()
 		if !errors.Is(err, errGone) {
 			break
 		}
 	}
 	if committed {
+		defer s.hooks.Done()
 		s.mu.Lock()
 		fn := s.onMinute
 		s.mu.Unlock()
