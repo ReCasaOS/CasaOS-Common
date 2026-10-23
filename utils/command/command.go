@@ -20,7 +20,8 @@ import (
 
 // Deprecated: This method is not safe, sould have ensure input.
 func OnlyExec(cmdStr string) (string, error) {
-	cmd := exec.Command("/bin/bash", "-c", cmdStr)
+	// bash from PATH: not every host has /bin/bash (NixOS: only /bin/sh, /usr/bin/env)
+	cmd := exec.Command("bash", "-c", cmdStr)
 	buf, err := cmd.CombinedOutput()
 	return string(buf), err
 }

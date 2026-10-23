@@ -2,6 +2,7 @@ package command
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -234,5 +235,26 @@ func TestAHungScriptIsKilledAtItsTimeout(t *testing.T) {
 	}
 	if r := results[1]; r.err != nil || r.output != "still ran" {
 		t.Errorf("next script: got output %q, %v", r.output, r.err)
+	}
+}
+
+// OnlyExec finds bash through PATH, not at /bin/bash.
+func TestOnlyExecResolvesBashFromPath(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("no bash on PATH")
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(bash, filepath.Join(dir, "bash")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	out, err := OnlyExec("echo $BASH")
+	if err != nil {
+		t.Fatalf("OnlyExec: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(out); got != filepath.Join(dir, "bash") {
+		t.Fatalf("ran %q, want the bash on PATH (%s)", got, filepath.Join(dir, "bash"))
 	}
 }
