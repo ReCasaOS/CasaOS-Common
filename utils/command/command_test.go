@@ -240,6 +240,9 @@ func TestAHungScriptIsKilledAtItsTimeout(t *testing.T) {
 
 // OnlyExec finds bash through PATH, not at /bin/bash.
 func TestOnlyExecResolvesBashFromPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("a symlinked bash on PATH; CI runs this on Linux")
+	}
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("no bash on PATH")
