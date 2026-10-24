@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ReCasaOS/CasaOS-Common/utils/jwt"
 	"github.com/stretchr/testify/assert"
@@ -56,12 +57,18 @@ func TestJwtFlow(t *testing.T) {
 	assert.Equal(t, username, claims.Username)
 	assert.Equal(t, id, claims.ID)
 
-	// Validate the refresh token
+	// A refresh token is signed by the same key but opens no route
 	valid, claims, err = jwt.Validate(refreshToken, func() (*ecdsa.PublicKey, error) { return consumedPublicKey, nil })
+	assert.Error(t, err)
+	assert.False(t, valid)
+	assert.Nil(t, claims)
+
+	// nor does any other issuer
+	other, err := jwt.GenerateToken(username, privateKey, id, "2fa", time.Minute)
 	require.NoError(t, err)
-	assert.True(t, valid)
-	assert.Equal(t, username, claims.Username)
-	assert.Equal(t, id, claims.ID)
+	valid, _, err = jwt.Validate(other, func() (*ecdsa.PublicKey, error) { return consumedPublicKey, nil })
+	assert.Error(t, err)
+	assert.False(t, valid)
 }
 
 func TestInvalidToken(t *testing.T) {

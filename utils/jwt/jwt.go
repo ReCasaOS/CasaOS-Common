@@ -50,9 +50,12 @@ func ParseToken(signedToken string, publicKeyFunc func() (*ecdsa.PublicKey, erro
 	return nil, errors.New("invalid token")
 }
 
+// AccessIssuer is the issuer of an access token, the only token Validate accepts.
+const AccessIssuer = "casaos"
+
 // get AccessToken
 func GetAccessToken(username string, privateKey *ecdsa.PrivateKey, id int) (string, error) {
-	return GenerateToken(username, privateKey, id, "casaos", 3*time.Hour)
+	return GenerateToken(username, privateKey, id, AccessIssuer, 3*time.Hour)
 }
 
 func GetRefreshToken(username string, private *ecdsa.PrivateKey, id int) (string, error) {
@@ -65,9 +68,10 @@ func Validate(token string, publicKeyFunc func() (*ecdsa.PublicKey, error)) (boo
 		return false, nil, err
 	}
 
-	if claims != nil {
-		return true, claims, nil
+	// a refresh token lives seven days and is meant for the refresh call alone: it opens no route
+	if claims == nil || claims.Issuer != AccessIssuer {
+		return false, nil, errors.New("not an access token")
 	}
 
-	return false, nil, errors.New("invalid token")
+	return true, claims, nil
 }
