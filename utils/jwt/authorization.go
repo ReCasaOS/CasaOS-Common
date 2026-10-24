@@ -6,7 +6,8 @@ import "strings"
 // the bare token (as CasaOS clients have always sent it), or the standard
 // `Bearer <token>` (RFC 6750; the scheme is case-insensitive, RFC 7235).
 // Every other scheme, `Internal <secret>` among them, is returned as it came:
-// it parses as no token.
+// it is rejected as an invalid token. Only a space separates the scheme
+// (RFC 7235 SP): `Bearer<TAB>token` is returned whole, and rejected too.
 func TokenFromAuthorization(authorization string) string {
 	value := strings.TrimSpace(authorization)
 	scheme, rest, found := strings.Cut(value, " ")
