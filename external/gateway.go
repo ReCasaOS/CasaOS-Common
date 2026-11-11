@@ -18,6 +18,7 @@ import (
 
 const (
 	ManagementURLFilename = "management.url"
+	AppManageURLFilename  = "app-management.url"
 	StaticURLFilename     = "static.url"
 	APIGatewayRoutes      = "/v1/gateway/routes"
 	APIGatewayPort        = "/v1/gateway/port"
