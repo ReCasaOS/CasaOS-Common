@@ -753,23 +753,6 @@ func MoveFile(sourcePath, destPath string) error {
 	return nil
 }
 
-func FindFirstFile(root string, filename string) string {
-	var result string
-
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return filepath.SkipDir
-		}
-
-		if info.Name() == filename {
-			result = path
-			return errors.New("stop walking")
-		}
-		return nil
-	})
-	return result
-}
-
 func IsDirEmpty(name string) (bool, error) {
 	f, err := os.Open(name)
 	if err != nil {
