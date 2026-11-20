@@ -425,6 +425,22 @@ func GetCompressionAlgorithm(t string) (string, archives.ArchiverAsync, error) {
 // done. After an error nothing more is written to w, so the archive is left
 // unterminated rather than looking complete.
 func WriteArchive(ctx context.Context, w io.Writer, format archives.ArchiverAsync, commonPath string, paths []string) error {
+	return writeArchive(ctx, w, format, paths, func(add func(archives.FileInfo) error, p string) error {
+		return addTree(ctx, add, commonPath, p)
+	})
+}
+
+// WriteArchiveIn is WriteArchive below top, the folder topPath, for paths relative to it
+// (as fs.ValidPath takes them), under commonRel: every path, a selected symlink included, is
+// resolved by top, so nothing outside it is read whatever is renamed while the archive is
+// written. Entries are named as WriteArchive names them for the same full paths.
+func WriteArchiveIn(ctx context.Context, w io.Writer, format archives.ArchiverAsync, top *os.Root, topPath, commonRel string, paths []string) error {
+	return writeArchive(ctx, w, format, paths, func(add func(archives.FileInfo) error, p string) error {
+		return addTreeIn(ctx, add, top, topPath, commonRel, p)
+	})
+}
+
+func writeArchive(ctx context.Context, w io.Writer, format archives.ArchiverAsync, paths []string, addOne func(func(archives.FileInfo) error, string) error) error {
 	if len(paths) == 0 {
 		return errors.New("no path to archive")
 	}
@@ -452,7 +468,7 @@ func WriteArchive(ctx context.Context, w io.Writer, format archives.ArchiverAsyn
 
 	var err error
 	for _, p := range paths {
-		if err = addTree(ctx, add, commonPath, p); err != nil {
+		if err = addOne(add, p); err != nil {
 			err = fmt.Errorf("archive %s: %w", p, err)
 			out.fail(err) // leave the archive unterminated
 			break
@@ -497,8 +513,40 @@ func addTree(ctx context.Context, add func(archives.FileInfo) error, commonPath,
 		return err
 	}
 	defer root.Close()
-	skipStart := info.IsDir() && selected == filepath.Clean(commonPath)
 
+	return walkTree(ctx, add, root, start, name, info.IsDir() && selected == filepath.Clean(commonPath))
+}
+
+// addTreeIn is addTree for selected, relative to top: the selected path, a link in it
+// included, is resolved by top.
+func addTreeIn(ctx context.Context, add func(archives.FileInfo) error, top *os.Root, topPath, commonRel, selected string) error {
+	selected, commonRel = path.Clean(selected), path.Clean(commonRel)
+	if !fs.ValidPath(selected) || !fs.ValidPath(commonRel) {
+		return fmt.Errorf("%s: not a path below the root", selected)
+	}
+	name, err := entryName(path.Join(topPath, commonRel), path.Join(topPath, selected))
+	if err != nil {
+		return err
+	}
+	info, err := top.Stat(selected)
+	if err != nil {
+		return err
+	}
+	dir, start := selected, "."
+	if !info.IsDir() {
+		dir, start = path.Dir(selected), path.Base(selected)
+	}
+	root, err := top.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	return walkTree(ctx, add, root, start, name, info.IsDir() && selected == commonRel)
+}
+
+// walkTree hands add the entries below start in root, named after name.
+func walkTree(ctx context.Context, add func(archives.FileInfo) error, root *os.Root, start, name string, skipStart bool) error {
 	return fs.WalkDir(root.FS(), start, func(p string, _ fs.DirEntry, err error) error {
 		if err == nil {
 			err = ctx.Err()
