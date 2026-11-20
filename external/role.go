@@ -1,6 +1,7 @@
 package external
 
 import (
+	"path"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -22,6 +23,7 @@ const (
 type roleEntry struct {
 	role     string
 	rights   []string  // valid names only; read with the role, from the same answer
+	folders  []Folder  // the folders of Files given to the account, from the same answer
 	gone     bool      // user-service said it has no such account
 	at       time.Time // last successful answer; zero when there never was one
 	failedAt time.Time // last failed attempt
@@ -94,6 +96,35 @@ func AccountGone(runtimePath string, userID int) bool {
 
 var validRights = []string{"storage", "vm", "backups", "fleet", "system"}
 
+// FilesRight is the right an account has while it is given at least one folder: it is
+// derived from the folders, never set on its own.
+const FilesRight = "files"
+
+// Folder is a folder of Files given to an account, to read, or to read and write.
+type Folder struct {
+	Path  string `json:"path"`
+	Write bool   `json:"write"`
+}
+
+// foldersMax bounds the folders read for one account.
+const foldersMax = 32
+
+// validFoldersIn keeps the folders whose path is absolute and spelled once (no `.`, `..`
+// or `//`), not `/`, the first of each path, at most foldersMax.
+func validFoldersIn(folders []Folder) []Folder {
+	var out []Folder
+	seen := map[string]bool{}
+	for _, f := range folders {
+		p := f.Path
+		if len(out) == foldersMax || p == "" || p[0] != '/' || p == "/" || path.Clean(p) != p || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, Folder{Path: p, Write: f.Write})
+	}
+	return out
+}
+
 // ValidRights lists the names a right can have.
 func ValidRights() []string { return append([]string(nil), validRights...) }
 
@@ -126,8 +157,29 @@ func RightsOf(runtimePath, id string) map[string]bool {
 	for _, n := range e.rights {
 		rights[n] = true
 	}
+	if len(e.folders) > 0 {
+		rights[FilesRight] = true
+	}
 
 	return rights
+}
+
+// FoldersOf is the folders of Files given to a user account, from the same cached answer
+// as its role, and as closed as RightsOf: nothing unless the last successful answer is
+// under five seconds old, nothing for the administrator (who passes by role), a gone
+// account, an unknown role, an invalid id and any failure. Never nil.
+func FoldersOf(runtimePath, id string) []Folder {
+	folders := []Folder{}
+	userID, err := strconv.Atoi(id)
+	if err != nil || userID <= 0 {
+		return folders
+	}
+	e := lookupRole(runtimePath, userID)
+	if e.at.IsZero() || e.gone || e.role != "user" || roleNow().Sub(e.at) >= roleFresh {
+		return folders
+	}
+
+	return append(folders, e.folders...)
 }
 
 func lookupRole(runtimePath string, userID int) (result roleEntry) {
@@ -155,11 +207,12 @@ func lookupRole(runtimePath string, userID int) (result roleEntry) {
 	// in-flight call removed and the waiters released; a panic counts as a failure.
 	role, gone, ok := "", false, false
 	var rights []string
+	var folders []Folder
 	defer func() {
 		roleMu.Lock()
 		now := roleNow()
 		if ok {
-			known = roleEntry{role: role, rights: rights, gone: gone, at: now}
+			known = roleEntry{role: role, rights: rights, folders: folders, gone: gone, at: now}
 			call.entry = known
 		} else {
 			known.failedAt = now
@@ -171,7 +224,7 @@ func lookupRole(runtimePath string, userID int) (result roleEntry) {
 		close(call.done)
 		result = call.entry
 	}()
-	role, rights, gone, ok = fetchRole(runtimePath, userID)
+	role, rights, folders, gone, ok = fetchRole(runtimePath, userID)
 
 	return roleEntry{}
 }
@@ -192,50 +245,51 @@ func staleOrUser(e roleEntry, now time.Time) roleEntry {
 // answer only when its body is user-service's own word for a missing account
 // (gone); any other 404, like an older user-service without this route, is a
 // failure. The box's secret is only sent to an address on this machine.
-func fetchRole(runtimePath string, userID int) (role string, rights []string, gone, ok bool) {
+func fetchRole(runtimePath string, userID int) (role string, rights []string, folders []Folder, gone, ok bool) {
 	address, err := readUserServiceAddress(filepath.Join(runtimePath, UserServiceAddressFilename))
 	if err != nil {
-		return "", nil, false, false
+		return "", nil, nil, false, false
 	}
 	roleURL, err := url.JoinPath(address, "/v1/users/role", strconv.Itoa(userID))
 	if err != nil {
-		return "", nil, false, false
+		return "", nil, nil, false, false
 	}
 	req, err := http.NewRequest(http.MethodGet, roleURL, nil)
 	if err != nil || !isLoopbackHost(req.URL.Hostname()) {
-		return "", nil, false, false
+		return "", nil, nil, false, false
 	}
 	req.Header.Set("Authorization", InternalAuthorization(runtimePath))
 
 	resp, err := roleClient.Do(req)
 	if err != nil {
-		return "", nil, false, false
+		return "", nil, nil, false, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		return "", nil, false, false
+		return "", nil, nil, false, false
 	}
 	var body struct {
 		Success int      `json:"success"`
 		Data    string   `json:"data"`
-		Rights  []string `json:"rights"` // absent from an older user-service: no rights
+		Rights  []string `json:"rights"`  // absent from an older user-service: no rights
+		Folders []Folder `json:"folders"` // absent from an older user-service: no folders
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body) != nil {
-		return "", nil, false, false
+		return "", nil, nil, false, false
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		if body.Success != common_err.USER_NOT_EXIST {
-			return "", nil, false, false
+			return "", nil, nil, false, false
 		}
-		return "user", nil, true, true
+		return "user", nil, nil, true, true
 	}
 	if body.Success != common_err.SUCCESS { // a 200 that is not a success says nothing of the role
-		return "", nil, false, false
+		return "", nil, nil, false, false
 	}
 	if body.Data == "admin" {
-		return "admin", nil, false, true
+		return "admin", nil, nil, false, true
 	}
 
-	return "user", validRightsIn(body.Rights), false, true
+	return "user", validRightsIn(body.Rights), validFoldersIn(body.Folders), false, true
 }
