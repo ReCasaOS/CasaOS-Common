@@ -1,14 +1,15 @@
 package external
 
 import (
-	"path"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,7 +111,9 @@ type Folder struct {
 const foldersMax = 32
 
 // validFoldersIn keeps the folders whose path is absolute and spelled once (no `.`, `..`
-// or `//`), not `/`, the first of each path, at most foldersMax.
+// or `//`), not `/`, the first of each path, at most foldersMax. A list with a folder inside
+// another is none at all: which mode applies below the inner one would be in doubt, and
+// user-service never stores such a list.
 func validFoldersIn(folders []Folder) []Folder {
 	var out []Folder
 	seen := map[string]bool{}
@@ -118,6 +121,11 @@ func validFoldersIn(folders []Folder) []Folder {
 		p := f.Path
 		if len(out) == foldersMax || p == "" || p[0] != '/' || p == "/" || path.Clean(p) != p || seen[p] {
 			continue
+		}
+		for _, other := range out {
+			if strings.HasPrefix(p, other.Path+"/") || strings.HasPrefix(other.Path, p+"/") {
+				return nil
+			}
 		}
 		seen[p] = true
 		out = append(out, Folder{Path: p, Write: f.Write})

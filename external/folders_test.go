@@ -58,3 +58,14 @@ func TestFoldersOfIsClosed(t *testing.T) {
 		t.Fatal("folders from a stale answer")
 	}
 }
+
+// A folder inside another leaves the mode below the inner one in doubt: no folder at all.
+func TestNestedFoldersAreNone(t *testing.T) {
+	dir, _, _, _ := rightsServer(t, replyOf(`{"success":200,"data":"user","folders":[{"path":"/DATA/w","write":true},{"path":"/DATA/w/ro"}]}`))
+	if got := FoldersOf(dir, "4"); len(got) != 0 {
+		t.Fatalf("folders: %v", got)
+	}
+	if RightsOf(dir, "4")[FilesRight] {
+		t.Fatal("files with nested folders")
+	}
+}
